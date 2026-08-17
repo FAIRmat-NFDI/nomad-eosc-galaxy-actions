@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: 'nomad-eosc-galaxy-actions: A NOMAD Actions plugin for the EOSC demonstrator with Galaxy.'
+version: 0.1.0
+message:
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Lukas
+    family-names: Pielsticker
+    orcid: 'https://orcid.org/0000-0001-9361-8333'
+doi: 10.5281/zenodo.0000000
+repository-code: https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions
+url: https://zenodo.org/records/0000000
+keywords:
+  - NOMAD
+  - NOMAD Actions
+  - EOSC
+  - Galaxy
+  - Workflows
+abstract:
+  This is a template for a CITATION.cff file. Please edit the fields accordingly.
+license: MIT

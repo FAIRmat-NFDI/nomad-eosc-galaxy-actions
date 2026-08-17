@@ -1,0 +1,92 @@
+name: Upload Python Package
+
+on:
+  release:
+    types: [published]
+
+env:
+  UV_VERSION: 0.9
+  PYTHON_VERSION: 3.12
+  UV_SYSTEM_PYTHON: true
+
+jobs:
+  cff-version-check:
+    name: Check cff-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Git tag version
+        id: git_tag_version
+        run: |
+          GIT_TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$GIT_TAG_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Citation version
+        id: citation_version
+        run: |
+          CITATION_VERSION=$(grep '^version:' CITATION.cff | cut -d' ' -f2)
+          echo "version=$CITATION_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Fail if versions mismatch
+        run: |
+          if [ "${{ steps.git_tag_version.outputs.version }}" != "${{ steps.citation_version.outputs.version }}" ]; then
+            echo "Version mismatch: Git tag is ${{ steps.git_tag_version.outputs.version }}, CITATION.cff is ${{ steps.citation_version.outputs.version }}"
+            exit 1
+          fi
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install uv and set the python version to ${{ env.PYTHON_VERSION }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: |
+          uv pip install -e ".[dev]"
+      - name: Test with pytest
+        run: pytest tests/
+
+  build:
+    name: Build Package
+    needs: [cff-version-check, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install uv and set the python version to ${{ env.PYTHON_VERSION }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build package
+        run: uv build
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
+
+  deploy:
+    name: Upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nomad-eosc-galaxy-actions
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nomad-eosc-galaxy-actions"
+description = "NOMAD Action that sends an XPS spectrum to Galaxy for peak finding and links the result back (EOSC demonstrator)."
+version = "0.1.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "The NOMAD authors", email = "fairmat@physik.hu-berlin.de" },
+]
+dependencies = [
+    "nomad-lab>=1.4.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[project.entry-points.'nomad.plugin']
+find_peaks_action = "nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action"
+find_peaks_schema_package = "nomad_eosc_galaxy_actions.schema_packages:schema_package_entry_point"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
