@@ -4,11 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nomad-eosc-galaxy-actions"
-description = "NOMAD Action that sends an XPS spectrum to Galaxy for peak finding and links the result back (EOSC demonstrator)."
 version = "0.1.0"
-requires-python = ">=3.10"
+description = "NOMAD Action that sends an XPS spectrum to Galaxy for peak finding and links the result back (EOSC demonstrator)."
+readme = "README.md"
+license = { file = "LICENSE" }
 authors = [
-    { name = "The NOMAD authors", email = "fairmat@physik.hu-berlin.de" },
+    { name = "Lukas Pielsticker", email = "lukas.pielsticker@physik.hu-berlin.de" },
+]
+maintainers = [
+    { name = "Lukas Pielsticker", email = "lukas.pielsticker@physik.hu-berlin.de" },
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
 ]
 dependencies = [
     "nomad-lab>=1.4.3",
@@ -16,9 +29,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff",
+    "mypy",
+    "ruff>=0.15.0",
     "pytest",
+    "pre-commit",
+    "cruft",
 ]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocs-material-extensions",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions"
+"Bug Tracker" = "https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/issues"
+
 
 [project.entry-points.'nomad.plugin']
 find_peaks_action = "nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action"
@@ -27,5 +53,38 @@ find_peaks_schema_package = "nomad_eosc_galaxy_actions.schema_packages:schema_pa
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "node-and-date"
+
 [tool.ruff]
+include = ["src/nomad_eosc_galaxy_actions/**/*.py", "tests/**/*.py"]
 line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle
+    "W", # pycodestyle
+    "PL", # pylint
+    "UP", # pyupgrade
+    "F401", # remove unused import
+    "I001", # sort imports
+    "NPY201", # upgrade numpy v2
+]
+ignore = []
+ixable = ["ALL"]
+isort.split-on-trailing-comma = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.mypy]
+strict = false
+ignore_missing_imports = true
+follow_imports = "silent"
+no_strict_optional = true
+disable_error_code = "import, annotation-unchecked"
