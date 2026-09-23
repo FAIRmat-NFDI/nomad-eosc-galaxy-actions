@@ -9,7 +9,10 @@ description = "NOMAD Action that sends an XPS spectrum to Galaxy for peak findin
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Lukas Pielsticker", email = "lukas.pielsticker@physik.hu-berlin.de" },
+    { name = "Lukas Pielsticker" },
+    { name = "Björn Grüning" },
+    { name = "Michael Krieger" },
+    { name = "Heiko B. Weber" },
 ]
 maintainers = [
     { name = "Lukas Pielsticker", email = "lukas.pielsticker@physik.hu-berlin.de" },
@@ -25,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "nomad-lab>=1.4.3",
+    "bioblend",
 ]
 
 [project.optional-dependencies]
@@ -53,12 +57,15 @@ find_peaks_schema_package = "nomad_eosc_galaxy_actions.schema_packages:schema_pa
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+nomad_eosc_galaxy_actions = ["actions/find_peaks/data/*.ga"]
+
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
 local_scheme = "node-and-date"
 
 [tool.ruff]
-include = ["src/nomad_eosc_galaxy_actions/**/*.py", "tests/**/*.py"]
+include = ["src/nomad_eosc_galaxy_actions/**/*.py", "tests/**/*.py", "examples/**/*.py"]
 line-length = 88
 indent-width = 4
 
@@ -73,7 +80,7 @@ select = [
     "NPY201", # upgrade numpy v2
 ]
 ignore = []
-ixable = ["ALL"]
+fixable = ["ALL"]
 isort.split-on-trailing-comma = false
 
 [tool.ruff.format]

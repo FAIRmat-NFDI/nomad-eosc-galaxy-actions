@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: The nomad-eosc-galaxy-actions Authors
+#
+# This file is part of nomad-eosc-galaxy-actions.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Trigger entry for the find-peaks Action.
 
 A small, separate entry rather than a button on the XPS entry itself, since
@@ -12,84 +17,152 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
 from nomad.actions.manager import get_action_status, start_action
-from nomad.datamodel.data import ArchiveSection, EntryData
+from nomad.datamodel.data import EntryData
 from nomad.datamodel.metainfo.annotations import ELNAnnotation, ELNComponentEnum
 from nomad.metainfo import Quantity, SchemaPackage
+from pydantic import SecretStr
 
 from nomad_eosc_galaxy_actions.actions.find_peaks.models import FindPeaksWorkflowInput
+from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_spectrum
 
 m_package = SchemaPackage()
 
 
 class FindPeaksTrigger(EntryData):
-    """Triggers the find-peaks Action for a referenced XPS spectrum entry.
+    """Triggers the find-peaks Action for a referenced XPS spectrum entry."""
 
-    Currently wired to an empty-run Action skeleton: `workflow_status` reaching
-    `COMPLETED` confirms the Temporal round trip and this entry's UI, before
-    any real NeXus reading or Galaxy call is added to the activity.
-    """
-
-    spectrum = Quantity(
-        type=ArchiveSection,
-        description='The source XPS spectrum entry to find peaks in.',
-        a_eln=ELNAnnotation(component=ELNComponentEnum.ReferenceEditQuantity),
+    spectrum_entry_id = Quantity(
+        type=str,
+        description=(
+            "entry_id of the source XPS spectrum entry to find peaks in -- copy it "
+            "from that entry's URL/overview page."
+        ),
+        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+    )
+    galaxy_api_key = Quantity(
+        type=str,
+        description=(
+            "API key for the Galaxy account the action runs as. Leave empty to fall "
+            "back to the worker's own GALAXY_API_KEY environment variable (an "
+            "institute-wide/testing key) -- fill this in only for a genuine "
+            "per-user key. NOMAD has no masked/password ELN component -- whatever "
+            "is typed here is stored and displayed as plain text in the entry "
+            "archive, like any other quantity. Do not use a real personal key "
+            "here in a shared/published upload."
+        ),
+        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+    )
+    prominence = Quantity(
+        type=float,
+        description=(
+            "How far a peak must stand out from the surrounding baseline, in the "
+            "spectrum's own intensity units. Left empty, scipy applies no prominence "
+            "filter and typically returns hundreds of peaks. For a survey spectrum "
+            "in counts per second, 10000 is a reasonable starting point."
+        ),
+        a_eln=ELNAnnotation(component=ELNComponentEnum.NumberEditQuantity),
+    )
+    distance = Quantity(
+        type=float,
+        description=(
+            "Minimal horizontal distance between peaks, in data points, not energy "
+            "units. Smaller peaks within this distance of a larger one are "
+            "discarded. 20 is a reasonable starting point for a survey spectrum."
+        ),
+        a_eln=ELNAnnotation(component=ELNComponentEnum.NumberEditQuantity),
+    )
+    height = Quantity(
+        type=float,
+        description=(
+            "Minimum intensity a peak must reach, in the spectrum's own intensity "
+            "units. Unlike prominence, this ignores the local baseline, so it's "
+            "mostly useful for picking out only the strongest lines."
+        ),
+        a_eln=ELNAnnotation(component=ELNComponentEnum.NumberEditQuantity),
     )
     workflow_id = Quantity(
         type=str,
-        description='Unique ID of the triggered workflow run.',
+        description="Unique ID of the triggered workflow run.",
     )
     workflow_status = Quantity(
         type=str,
-        description='Status of the workflow run: RUNNING, COMPLETED, FAILED, ...',
+        description="Status of the workflow run: RUNNING, COMPLETED, FAILED, ...",
     )
-    result_entry = Quantity(
-        type=ArchiveSection,
+    result_entry_id = Quantity(
+        type=str,
         description=(
-            'The new entry holding the original spectrum and detected peaks, '
-            'once the Action completes. Not yet wired up in this skeleton.'
+            "entry_id of the new entry holding the original spectrum and detected "
+            "peaks, once the Action completes. Not yet wired up -- see "
+            "create_result_entry."
         ),
-        a_eln=ELNAnnotation(component=ELNComponentEnum.ReferenceEditQuantity),
     )
 
     trigger_find_peaks = Quantity(
         type=bool,
-        description='Starts an asynchronous run of the find-peaks action.',
+        description="Starts an asynchronous run of the find-peaks action.",
         a_eln=ELNAnnotation(
             component=ELNComponentEnum.ActionEditQuantity,
-            label='Find Peaks',
+            label="Find Peaks",
         ),
     )
     trigger_get_status = Quantity(
         type=bool,
-        description='Fetches the status for the current workflow run.',
+        description="Fetches the status for the current workflow run.",
         a_eln=ELNAnnotation(
             component=ELNComponentEnum.ActionEditQuantity,
-            label='Get Action Status',
+            label="Get Action Status",
         ),
     )
 
-    def run_find_peaks(self, archive: 'EntryArchive', logger: 'BoundLogger') -> None:
-        if not self.spectrum:
-            logger.warning('No spectrum referenced. Cannot start the find-peaks action.')
+    def run_find_peaks(self, archive: "EntryArchive", logger: "BoundLogger") -> None:
+        import os  # noqa: PLC0415
+
+        if not self.spectrum_entry_id:
+            logger.warning(
+                "No spectrum_entry_id set. Cannot start the find-peaks action."
+            )
             return
+        api_key = self.galaxy_api_key or os.environ.get("GALAXY_API_KEY")
+        if not api_key:
+            logger.warning(
+                "No Galaxy API key set (entry field empty and no GALAXY_API_KEY "
+                "environment variable on the worker). Cannot start the "
+                "find-peaks action."
+            )
+            return
+
+        user_id = archive.metadata.authors[0].user_id
+        # Fails fast, here in the trigger entry's own UI, on a bad entry_id or a
+        # mainfile that isn't a NeXus file -- rather than starting the action and
+        # having it fail later.
+        try:
+            spectrum = resolve_spectrum(self.spectrum_entry_id, user_id)
+        except (ValueError, PermissionError) as e:
+            logger.warning(f"Cannot start the find-peaks action: {e}")
+            return
+
         self.workflow_status = None
         self.workflow_id = None
         input_data = FindPeaksWorkflowInput(
-            user_id=archive.metadata.authors[0].user_id,
-            upload_id=archive.metadata.upload_id,
-            spectrum_entry_id=self.spectrum.m_root().metadata.entry_id,
+            user_id=user_id,
+            upload_id=spectrum.upload_id,
+            spectrum_entry_id=self.spectrum_entry_id,
+            galaxy_api_key=SecretStr(api_key),
+            prominence=self.prominence,
+            distance=self.distance,
+            height=self.height,
         )
         self.workflow_id = start_action(
-            action_id='nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action',
+            action_id="nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action",
             data=input_data,
         )
         self.trigger_get_status = True
 
-    def normalize(self, archive: 'EntryArchive', logger: 'BoundLogger') -> None:
+    def normalize(self, archive: "EntryArchive", logger: "BoundLogger") -> None:
         super().normalize(archive, logger)
         if self.trigger_find_peaks:
-            if self.workflow_status == 'RUNNING':
-                logger.warning('A run is already in progress.')
+            if self.workflow_status == "RUNNING":
+                logger.warning("A run is already in progress.")
             else:
                 self.run_find_peaks(archive, logger)
             self.trigger_find_peaks = False
@@ -101,7 +174,7 @@ class FindPeaksTrigger(EntryData):
                     )
                     self.workflow_status = status.name
                 except Exception as e:
-                    logger.error(f'Error getting workflow status: {e}')
+                    logger.error(f"Error getting workflow status: {e}")
             self.trigger_get_status = False
 
 

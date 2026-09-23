@@ -1,84 +1,15 @@
-# nomad-plugin-template
-A template repository for creating a repository with a NOMAD plugin package.
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+![](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/actions/workflows/actions.yml/badge.svg)
+![](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/actions/workflows/mkdocs-deploy.yml/badge.svg)
 
+# `nomad-eosc-galaxy-actions`: NOMAD ↔ Galaxy EOSC interoperability demonstrator
 
-## Getting started
+[NOMAD](https://nomad-lab.eu) is FAIRmat's research data platform for materials science; [Galaxy](https://usegalaxy.eu) is a widely-used scientific workflow platform. `nomad-eosc-galaxy-actions` connects the two: it provides a NOMAD Action that sends an XPS spectrum stored in NOMAD to Galaxy for peak finding, and links the annotated result back into NOMAD as a new entry once the Galaxy run completes. It's an interoperability demonstrator for the [German node of the European Open Science Cloud (EOSC)](https://eosc.eu/building-the-eosc-federation/eosc-node-germany). It demonstrate the interoperability of the platform and shows that NOMAD-stored data can be processed on an external workflow platform without leaving NOMAD's data model.
 
-1. Click on the `Use this template` button and create a new plugin repository. The form will ask you to fill out the name for the new plugin repository.
+## Docs
 
-2. In the newly created repository, start a new Github Codespace and generate the plugin structure.
+More information about this plugin is available in the [documentation](https://fairmat-nfdi.github.io/nomad-eosc-galaxy-actions/). If you are new here, or from the Galaxy team and want to see the workflow without a NOMAD deployment, start with the [tutorial](https://fairmat-nfdi.github.io/nomad-eosc-galaxy-actions/tutorial/tutorial.html).
 
-Run the following command to create a new NOMAD plugin project using cookiecutter-nomad-plugin:
+## Contact person in FAIRmat for this plugin
 
-```sh
-cruft create https://github.com/FAIRmat-NFDI/cookiecutter-nomad-plugin
-```
-
-Cookiecutter prompts you for information regarding your plugin:
-
-```no-highlight
-full_name [John Doe]: Citizen Kane
-email [john.doe@physik.hu-berlin.de]: citizen@kane.de
-github_username [foo]: kane
-plugin_name [foobar]: awesome-tools
-module_name [awesome_tools]: awesome_tools
-short_description [NOMAD example template]: An awesome plugin for NOMAD
-version [0.1.0]:
-Select license:
-1 - MIT
-2 - BSD-3
-3 - GNU GPL v3.0+
-Choose from 1, 2, 3 [1]: 2
-include_schema_package [y/n] (y): y
-include_normalizer [y/n] (y): n
-include_parser [y/n] (y): y
-include_app [y/n] (y): n
-
-INFO:post_gen_project:Initializing python for package - src
-..
-INFO:post_gen_project:Remove temporary folder: licenses
-INFO:post_gen_project:Remove temporary folder: macros
-INFO:post_gen_project:Remove temporary folder: py_sources
-```
-
-
-
-
-There you go - you just created a minimal NOMAD plugin:
-
-> [!NOTE]
-> In the above prompt, we pressed `y` for schema_package and parser, this creates a python package with two plugin entry points: one for parser and one for schema_package.
-
-```no-highlight
-nomad-awesome-tools/
-├── LICENSE
-├── README.rst
-├── pyproject.toml
-├── move_template_files.sh
-├── src
-│   └── nomad_awesome_tools
-│       ├── __init__.py
-|       ├── schema_packages
-│       |   ├── __init__.py
-│       |   └── plugin.py
-|       └── parsers
-│           ├── __init__.py
-│           └── plugin.py
-|
-├── tests
-│   ├── conftest.py
-│   └── test_awesome.py
-└── MANIFEST.in
-```
-
-
-> [!NOTE]
-> The project `nomad-awesome-tools` is created in a new directory, we have included a helper script to move all the files to the parent level of the repository.
-
-
-```sh
-sh CHANGE_TO_PLUGIN_NAME/move_template_files.sh
-```
-
-> [!IMPORTANT]
-> The `CHANGE_TO_PLUGIN_NAME` should be substituted by the name of the plugin you've created. In the above case it'll be `sh nomad-awesome-tools/move_template_files.sh`. 
+Lukas Pielsticker

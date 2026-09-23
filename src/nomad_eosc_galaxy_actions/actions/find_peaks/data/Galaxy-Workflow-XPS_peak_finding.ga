@@ -1,0 +1,94 @@
+{
+    "a_galaxy_workflow": "true",
+    "annotation": "",
+    "comments": [],
+    "creator": [
+        {
+            "class": "Organization",
+            "name": "FAIRmat",
+            "url": "https://www.fairmat-nfdi.eu/fairmat/"
+        }
+    ],
+    "format-version": "0.1",
+    "license": "MIT",
+    "name": "XPS peak finding",
+    "readme": "# Workflow for the EOSC-Node NFDI usecase with FAIRmat.",
+    "report": {
+        "markdown": "\n# Workflow Execution Report\n\n## Workflow Inputs\n```galaxy\ninvocation_inputs()\n```\n\n## Workflow Outputs\n```galaxy\ninvocation_outputs()\n```\n\n## Workflow\n```galaxy\nworkflow_display()\n```\n"
+    },
+    "steps": {
+        "0": {
+            "annotation": "",
+            "content_id": null,
+            "errors": null,
+            "id": 0,
+            "input_connections": {},
+            "inputs": [],
+            "label": null,
+            "name": "Input dataset",
+            "outputs": [],
+            "position": {
+                "left": 0,
+                "top": 0
+            },
+            "tool_id": null,
+            "tool_state": "{\"optional\": false, \"format\": [\"nxxps\"], \"tag\": null}",
+            "tool_version": null,
+            "type": "data_input",
+            "uuid": "1553cf0f-dca4-407c-8352-f6d4db6328eb",
+            "when": null,
+            "workflow_outputs": []
+        },
+        "1": {
+            "annotation": "",
+            "content_id": "toolshed.g2.bx.psu.edu/repos/bgruening/pynxtools_peak_finding/pynxtools_peak_finding/0.1.0+galaxy0",
+            "errors": null,
+            "id": 1,
+            "input_connections": {
+                "input_nxs": {
+                    "id": 0,
+                    "output_name": "output"
+                }
+            },
+            "inputs": [],
+            "label": null,
+            "name": "XPS peak finding",
+            "outputs": [
+                {
+                    "name": "output_nxs",
+                    "type": "nxxps"
+                },
+                {
+                    "name": "peaks_tabular",
+                    "type": "tabular"
+                },
+                {
+                    "name": "peaks_json",
+                    "type": "json"
+                }
+            ],
+            "position": {
+                "left": 420.0333251953125,
+                "top": 59
+            },
+            "post_job_actions": {},
+            "tool_id": "toolshed.g2.bx.psu.edu/repos/bgruening/pynxtools_peak_finding/pynxtools_peak_finding/0.1.0+galaxy0",
+            "tool_shed_repository": {
+                "changeset_revision": "0a6a35172776",
+                "name": "pynxtools_peak_finding",
+                "owner": "bgruening",
+                "tool_shed": "toolshed.g2.bx.psu.edu"
+            },
+            "tool_state": "{\"input_nxs\": {\"__class__\": \"ConnectedValue\"}, \"peak_detection\": {\"prominence\": null, \"distance\": null, \"height\": null}, \"__page__\": 0, \"__rerun_remap_job_id__\": null}",
+            "tool_uuid": null,
+            "tool_version": "0.1.0+galaxy0",
+            "type": "tool",
+            "uuid": "cb93d7d2-0bfc-452a-9c0d-955fb2a77e8c",
+            "when": null,
+            "workflow_outputs": []
+        }
+    },
+    "tags": [],
+    "uuid": "6a6d5a32-cf89-4348-bb88-65c14fea801f",
+    "version": 1
+}

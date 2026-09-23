@@ -1,0 +1,44 @@
+version = 1
+
+exclude = [
+  ".worktrees/**",
+  ".venv/**",
+]
+
+# Binary/data files that can't practically carry an inline header.
+[[annotations]]
+path = [
+  "docs/assets/*.png",
+  "examples/galaxy_demo/example_data/*.nxs",
+  "src/nomad_eosc_galaxy_actions/actions/find_peaks/data/*.ga",
+]
+SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Non-code project files (docs, CI, tooling config) that can't practically
+# carry an inline header.
+[[annotations]]
+path = ["docs/**"]
+SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  ".cruft.json",
+  ".cspell/custom-dictionary.txt",
+  ".devcontainer/**",
+  ".github/**",
+  ".gitignore",
+  ".pre-commit-config.yaml",
+  ".vscode/settings.json",
+  "CITATION.cff",
+  "MANIFEST.in",
+  "README.md",
+  "cspell.json",
+  "examples/galaxy_demo/README.md",
+  "mkdocs.yml",
+  "pyproject.toml",
+  "scripts/README.md",
+]
+SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
+SPDX-License-Identifier = "Apache-2.0"

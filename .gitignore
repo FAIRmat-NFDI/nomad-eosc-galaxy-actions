@@ -131,3 +131,6 @@ dmypy.json
 
 # start-experiment dashboard's generated .slt files (local runtime output)
 /output
+
+# scripts/test_galaxy_roundtrip.py's downloaded output
+scripts/roundtrip_result.nxs
