@@ -17,6 +17,7 @@ datamodel
 defn
 eosc
 galaxyproject
+harr
 inspectable
 lukaspie
 mainfile

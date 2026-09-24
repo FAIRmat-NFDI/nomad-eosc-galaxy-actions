@@ -28,7 +28,7 @@ from nomad_eosc_galaxy_actions.actions.find_peaks.models import (
 )
 from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_spectrum
 
-# Step layout of Galaxy-Workflow-XPS_peak_finding.ga -- specific to this one
+# Step layout of Galaxy-Workflow-XPS_peak_finding.ga — specific to this one
 # workflow, not to galaxy_client's generic upload_and_invoke().
 _WORKFLOW_INPUT_STEP = "0"
 _WORKFLOW_TOOL_STEP = "1"
@@ -84,7 +84,7 @@ def run_galaxy_workflow(data: RunGalaxyWorkflowInput) -> RunGalaxyWorkflowResult
         api_key=data.galaxy_api_key.get_secret_value(),
         workflow_id=entry_point.galaxy_workflow_id,
         file_path=data.spectrum_path,
-        # TODO: pass file_type='auto' once galaxyproject/galaxy#23273 lands --
+        # TODO: pass file_type='auto' once galaxyproject/galaxy#23273 lands —
         # NXxps is missing from <sniffers>, so auto-detection currently
         # resolves a plain .nxs upload to generic h5, not nxxps.
         file_type="nxxps",
@@ -103,7 +103,7 @@ def poll_galaxy_invocation(
     data: PollGalaxyInvocationInput,
 ) -> PollGalaxyInvocationResult:
     """Check the invocation's status once. Called repeatedly by the workflow,
-    which sleeps between calls -- polling does not block inside one activity."""
+    which sleeps between calls — polling does not block inside one activity."""
     entry_point = _galaxy_entry_point()
     result = galaxy_client.poll_invocation(
         api_key=data.galaxy_api_key.get_secret_value(),
@@ -138,7 +138,7 @@ def create_result_entry(data: CreateResultEntryInput) -> CreateResultEntryResult
     Simpler than creating a separate upload, and the natural place for it:
     NOMAD entries stay editable until the upload is published, so adding a
     raw file this way is ordinary processing, not a workaround. Requires the
-    original upload to still be unpublished -- `put_file_and_process_local`
+    original upload to still be unpublished — `put_file_and_process_local`
     asserts this itself.
     """
     from nomad.uploads import get_upload  # noqa: PLC0415
@@ -147,31 +147,31 @@ def create_result_entry(data: CreateResultEntryInput) -> CreateResultEntryResult
 
     # put_file_and_process_local() takes the destination filename from
     # os.path.basename(path) and copies it into the upload's raw storage
-    # itself -- rename our downloaded copy first so it doesn't collide with
+    # itself — rename our downloaded copy first so it doesn't collide with
     # a result from a different spectrum's run landing in the same target_dir.
     renamed_path = os.path.join(
         os.path.dirname(data.result_path), f"peaks_{data.spectrum_entry_id}.nxs"
     )
     # Retry-safe: a prior attempt of this same activity may have already
     # renamed the file before failing on a later step (put_file_and_process_local
-    # itself already tolerates being called again -- its own docstring says an
+    # itself already tolerates being called again — its own docstring says an
     # existing target path is overwritten, not rejected).
     if os.path.exists(data.result_path):
         os.replace(data.result_path, renamed_path)
     elif not os.path.exists(renamed_path):
         raise FileNotFoundError(
-            f"Neither {data.result_path} nor {renamed_path} exist -- "
-            "cannot recover the downloaded result on retry."
+            f"Neither {data.result_path} nor {renamed_path} exist. "
+            "Cannot recover the downloaded result on retry."
         )
 
     upload = get_upload(spectrum.upload_id, data.user_id)
     entry = upload.put_file_and_process_local(renamed_path, target_dir="galaxy_results")
     if entry is None:
-        # No parser matched -- most likely this NOMAD deployment doesn't have
+        # No parser matched — most likely this NOMAD deployment doesn't have
         # pynxtools' NeXus parser entry point enabled. The raw file is still
         # in the upload either way; it just isn't processed into an entry.
         activity.logger.warning(
-            "No parser matched %s after adding it to upload %s -- the file "
+            "No parser matched %s after adding it to upload %s. The file "
             "is in the upload but no entry was created.",
             renamed_path,
             spectrum.upload_id,

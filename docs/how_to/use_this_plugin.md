@@ -6,6 +6,10 @@ Read the [NOMAD plugin documentation](https://nomad-lab.eu/prod/v1/staging/docs/
 
 ## Find peaks in a spectrum
 
+The fastest way to try this is the bundled NOMAD example upload: on the *Projects* page, click **Add example uploads** and choose **XPS Peak Finding via Galaxy** — it comes with a spectrum and an almost-ready trigger entry, and its own README walks through the same five steps below. The example upload only appears if it's enabled in your deployment's `nomad.yaml`, see [Install This Plugin](install_this_plugin.md).
+
+To do it with your own data instead:
+
 1. Upload an XPS spectrum as an `NXxps` `.nxs` file, ideally one with several distinct peaks so there's something to find, and let it process into an entry — `examples/galaxy_demo/example_data/vms_regular_ref.nxs` in this repo is a good reference if you don't have one of your own.
 2. Create a **Find Peaks Trigger** entry.
 3. Set `spectrum_entry_id` to the source XPS spectrum entry's `entry_id` (a plain string) — copy it from that entry's URL/overview page.

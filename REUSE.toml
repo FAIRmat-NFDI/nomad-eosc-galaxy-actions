@@ -11,6 +11,17 @@ path = [
   "docs/assets/*.png",
   "examples/galaxy_demo/example_data/*.nxs",
   "src/nomad_eosc_galaxy_actions/actions/find_peaks/data/*.ga",
+  "src/nomad_eosc_galaxy_actions/example_uploads/find_peaks/*.nxs",
+]
+SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# The example upload's own bundled content -- an end-user-facing README and a
+# ready-to-use archive entry, not this plugin's own source/docs.
+[[annotations]]
+path = [
+  "src/nomad_eosc_galaxy_actions/example_uploads/find_peaks/README.md",
+  "src/nomad_eosc_galaxy_actions/example_uploads/find_peaks/nomad.json",
 ]
 SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
 SPDX-License-Identifier = "Apache-2.0"

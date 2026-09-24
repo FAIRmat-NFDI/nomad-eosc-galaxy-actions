@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, SecretStr, field_serializer
 
 
 def _serialize_secret(value: SecretStr) -> str:
-    """Expose the secret's plain value in JSON -- Temporal serializes
+    """Expose the secret's plain value in JSON. Temporal serializes
     activity/workflow inputs with `model_dump_json`, so without this the
     activity on the other end would receive the masked placeholder instead
     of the real key."""
@@ -55,7 +55,7 @@ class FindPeaksWorkflowInput(BaseWorkflowInput):
 class ReadSpectrumInput(BaseModel):
     """Input for the activity that copies the spectrum out of upload storage.
 
-    Only `spectrum_entry_id` -- not `upload_id`/`mainfile_path` -- so the
+    Only `spectrum_entry_id` — not `upload_id`/`mainfile_path` — so the
     activity re-resolves both fresh via `resolve_spectrum()` on each retry,
     rather than trusting a value captured once at trigger time.
     """
@@ -116,7 +116,7 @@ class DownloadGalaxyResultInput(BaseModel):
 class CreateResultEntryInput(BaseModel):
     """Input for the activity that creates the new NOMAD entry from the result.
 
-    Only `spectrum_entry_id` -- not `upload_id` -- for the same reason as
+    Only `spectrum_entry_id` — not `upload_id` — for the same reason as
     `ReadSpectrumInput`: resolved fresh, not threaded through as a separate
     field that could drift out of sync with it.
     """
@@ -132,6 +132,6 @@ class CreateResultEntryResult(BaseModel):
     entry_id: str | None = Field(
         default=None,
         description="None if the raw file was added to the upload but no "
-        "parser matched it -- the file is still there, just not processed "
+        "parser matched it. The file is still there, just not processed "
         "into an entry yet.",
     )

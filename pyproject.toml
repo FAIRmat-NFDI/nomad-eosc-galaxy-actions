@@ -51,14 +51,19 @@ docs = [
 
 
 [project.entry-points.'nomad.plugin']
+find_peaks_schema_package = "nomad_eosc_galaxy_actions.schema_packages.find_peaks:find_peaks_schema_package"
 find_peaks_action = "nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action"
-find_peaks_schema_package = "nomad_eosc_galaxy_actions.schema_packages:schema_package_entry_point"
+find_peaks_example_upload = "nomad_eosc_galaxy_actions.example_uploads:find_peaks_example_upload"
+
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-nomad_eosc_galaxy_actions = ["actions/find_peaks/data/*.ga"]
+nomad_eosc_galaxy_actions = [
+    "actions/find_peaks/data/*.ga",
+    "example_uploads/find_peaks/*",
+]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"

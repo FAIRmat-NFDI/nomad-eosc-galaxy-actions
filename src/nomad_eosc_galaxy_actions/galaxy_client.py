@@ -6,7 +6,7 @@
 """Generic bioblend wrapper for driving a Galaxy workflow from NOMAD.
 
 Deliberately framework- and technique-agnostic (no Temporal/NOMAD imports,
-no tool/workflow assumptions) -- upload a file, invoke an already-imported
+no tool/workflow assumptions) — upload a file, invoke an already-imported
 workflow, poll it, download a result. Exercisable directly without a
 running Temporal worker.
 
@@ -57,12 +57,12 @@ def upload_and_invoke(  # noqa: PLR0913
         workflow_id: this account's copy of the workflow (see module docstring).
         file_path: local path of the file to upload.
         file_type: Galaxy datatype to force on upload. Defaults to Galaxy's own
-            auto-detection ('auto') -- pass the specific datatype explicitly
+            auto-detection ('auto') — pass the specific datatype explicitly
             when auto-detection can't be relied on (see the design doc's note
             on the `nxxps` sniffer bug for why XPS callers should).
         workflow_input_step: step index of the workflow's data-input step.
         tool_params: `{step_index: {param_name: value, ...}, ...}`, forwarded
-            to `invoke_workflow`'s `params` as-is -- shape depends entirely on
+            to `invoke_workflow`'s `params` as-is — shape depends entirely on
             the target tool(s)' own parameters.
         history_name: defaults to the uploaded file's stem if not given.
 
@@ -78,7 +78,7 @@ def upload_and_invoke(  # noqa: PLR0913
         str(file_path),
         history["id"],
         file_type=file_type,
-        to_posix_lines=False,  # do not touch line endings -- these are binary files
+        to_posix_lines=False,  # do not touch line endings — these are binary files
     )
     input_dataset_id = dataset["outputs"][0]["id"]
 

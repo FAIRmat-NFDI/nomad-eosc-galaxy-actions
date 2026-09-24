@@ -24,8 +24,8 @@ def resolve_spectrum(entry_id: str, user_id: str) -> ResolvedSpectrum:
     """Resolve a spectrum's entry_id to its upload_id and mainfile path.
 
     Enforces the requesting user's access and that the mainfile is a NeXus
-    file, so a bad entry_id fails clearly and immediately -- in the trigger
-    entry's own UI, or as an early activity failure -- rather than deep
+    file, so a bad entry_id fails clearly and immediately ( in the trigger
+    entry's own UI, or as an early activity failure) rather than deep
     inside a Galaxy upload with a file it can't make sense of.
 
     Raises:
@@ -44,7 +44,7 @@ def resolve_spectrum(entry_id: str, user_id: str) -> ResolvedSpectrum:
     if not entry.mainfile or not entry.mainfile.endswith(".nxs"):
         raise ValueError(
             f"Entry {entry_id} has mainfile {entry.mainfile!r}, which is not a "
-            "NeXus (.nxs) file -- find-peaks only works on NeXus spectra."
+            "NeXus (.nxs) file — find-peaks only works on NeXus spectra."
         )
 
     return ResolvedSpectrum(upload_id=entry.upload_id, mainfile=entry.mainfile)

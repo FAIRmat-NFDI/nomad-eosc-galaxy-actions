@@ -16,7 +16,7 @@
       "include_normalizer": false,
       "include_parser": false,
       "include_app": false,
-      "include_example_uploads": false,
+      "include_example_uploads": true,
       "include_action": true,
       "include_api": false,
       "include_north_tools": false,

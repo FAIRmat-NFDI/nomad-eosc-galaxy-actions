@@ -89,6 +89,10 @@ You'll need [`uv`](https://docs.astral.sh/uv/){:target="_blank" rel="noopener"} 
 
 This part needs a running NOMAD deployment with this plugin installed (see [Install This Plugin](../how_to/install_this_plugin.md)) and an XPS entry already in it (for example, converted by `pynxtools-xps`).
 
+Don't have an NXxps file handy? On the *Uploads* page, **Add example uploads** includes
+**XPS Peak Finding via Galaxy** (a spectrum and an almost-ready trigger entry
+bundled together) so you can skip straight to step 3 below.
+
 1. Bring up Temporal and a CPU action worker (from the `nomad-distro-dev` repo root):
 
    ```bash

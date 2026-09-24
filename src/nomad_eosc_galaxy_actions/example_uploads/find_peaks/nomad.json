@@ -1,0 +1,8 @@
+{
+  "comment": "Demonstrator for the nomad-eosc-galaxy-actions plugin: sends an XPS spectrum to Galaxy for peak finding and links the annotated result back into NOMAD as a new entry. See README.md in this upload for step-by-step instructions.",
+  "references": [
+    "https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions",
+    "https://fairmat-nfdi.github.io/nomad-eosc-galaxy-actions/",
+    "https://usegalaxy.eu/?tool_id=pynxtools_peak_finding"
+  ]
+}
