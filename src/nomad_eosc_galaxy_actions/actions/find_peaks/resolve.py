@@ -3,15 +3,17 @@
 # This file is part of nomad-eosc-galaxy-actions.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Resolving a spectrum's entry_id to what the Action's activities need.
+"""Resolving inputs the Action's activities need but only get an id/None for.
 
-One shared place for this so the trigger entry (a fast pre-flight check) and
-the activities (resolved fresh on each retry, not threaded through as
-separately-passed fields that could drift out of sync with entry_id) agree
-on exactly what counts as a valid spectrum.
+One shared place for this so each activity (resolved fresh on each retry,
+not threaded through as separately-passed fields that could drift out of
+sync) agrees on exactly what counts as a valid spectrum or API key.
 """
 
+import os
 from dataclasses import dataclass
+
+from pydantic import SecretStr
 
 
 @dataclass
@@ -24,9 +26,9 @@ def resolve_spectrum(entry_id: str, user_id: str) -> ResolvedSpectrum:
     """Resolve a spectrum's entry_id to its upload_id and mainfile path.
 
     Enforces the requesting user's access and that the mainfile is a NeXus
-    file, so a bad entry_id fails clearly and immediately ( in the trigger
-    entry's own UI, or as an early activity failure) rather than deep
-    inside a Galaxy upload with a file it can't make sense of.
+    file, so a bad entry_id fails clearly and immediately (as an early
+    activity failure) rather than deep inside a Galaxy upload with a file
+    it can't make sense of.
 
     Raises:
         ValueError: no such entry, or its mainfile isn't a `.nxs` file.
@@ -48,3 +50,25 @@ def resolve_spectrum(entry_id: str, user_id: str) -> ResolvedSpectrum:
         )
 
     return ResolvedSpectrum(upload_id=entry.upload_id, mainfile=entry.mainfile)
+
+
+def resolve_api_key(secret: SecretStr | None) -> str:
+    """Resolve the Galaxy API key to use: the one passed in the trigger's
+    input if given, otherwise the worker's own GALAXY_API_KEY environment
+    variable (an institute-wide/shared key, per the "Institute-wide secrets"
+    pattern for NOMAD Actions).
+
+    Raises:
+        ValueError: neither a per-trigger key nor the environment variable
+            is set.
+    """
+    if secret is not None:
+        return secret.get_secret_value()
+
+    api_key = os.environ.get("GALAXY_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "No Galaxy API key given, and no GALAXY_API_KEY environment "
+            "variable set on the worker."
+        )
+    return api_key

@@ -1,28 +1,25 @@
 # XPS Peak Finding via Galaxy
 
-A live demonstration of a NOMAD Action: an XPS spectrum stored in NOMAD is sent to
-[Galaxy](https://usegalaxy.eu) for peak finding, and the annotated result comes back
-as a new NOMAD entry, automatically.
+A live demonstration of a NOMAD Action: an XPS spectrum stored in NOMAD is sent to [Galaxy](https://usegalaxy.eu) for peak finding, and the annotated result comes back as a new NOMAD entry, automatically.
 
 ```
-xps_spectrum.nxs  — "Find Peaks"—>  Galaxy peak-finding workflow
-   (this upload)                                 |
-                                                 v
+xps_spectrum.nxs  -- "Find Peaks" action-->  Galaxy peak-finding workflow
+   (this upload)                                     |
+                                                     v
                           new entry: same spectrum + detected peaks
 ```
 
 ## What's in this upload
 
 - **`xps_spectrum.nxs`**: an example XPS spectrum, already converted to the   [`NXxps`](https://manual.nexusformat.org/classes/applications/NXxps.html#nxxps) NeXus application definition. Open it and select the **FILES** tab, then the file itself, to view it with the built-in H5Web viewer.
-- **`find_peaks_trigger.archive.yaml`**: a ready-to-use **Find Peaks Trigger**  entry. Everything is filled in except the spectrum's `entry_id` and a Galaxy API key.
+- **`nomad.json`**: upload-level metadata (a short description and links back to this plugin) that NOMAD applies automatically when this upload is created — not something you need to open or edit.
 
-## Try it: five steps to a finished round trip
+## Try it: four steps to a finished round trip
 
 1. **Get the spectrum's `entry_id`.** Open the `xps_spectrum.nxs` entry (click it in  the entries list above) and copy `entry_id` from its overview page.
-2. **Open the trigger entry.** Find **Find Peaks Trigger** in this upload's entries,   and paste that ID into `spectrum_entry_id`.
-3. **Add a Galaxy API key.** Create a free account at [usegalaxy.eu](https://usegalaxy.eu) if you don't have one, then go to User &rarr; Preferences &rarr; Manage API Key, and paste the key into `galaxy_api_key`. (Optional: tune `prominence`/`distance`/`height` — the defaults work fine for this example spectrum.)
-4. **Click Find Peaks.** `workflow_status` moves from `RUNNING` to `COMPLETED` — click **Get Action Status** to refresh it, or just wait, it's also checked automatically right after triggering.
-5. **Find the result.** A new entry appears in this upload: the same spectrum, now with an `NXfit` group holding one `NXpeak` per detected peak.
+2. **Open Actions.** In the main menu, go to **Actions**, and start a new run of **find_peaks_action** (or use the **Run action** button on this upload itself).
+3. **Fill in the form.** Paste the spectrum's `entry_id` into `spectrum_entry_id`. Add a Galaxy API key — create a free account at [usegalaxy.eu](https://usegalaxy.eu) if you don't have one, then go to User &rarr; Preferences &rarr; Manage API Key — or leave it empty if your deployment already has a shared key configured. (Optional: tune `prominence`/`distance`/`height`; the defaults work fine for this example spectrum.) Run it.
+4. **Watch it finish, then find the result.** The Actions view shows the run's status moving to `COMPLETED`. A new entry then appears in this upload: the same spectrum, now with an `NXfit` group holding one `NXpeak` per detected peak.
 
 ## Where to go from here
 

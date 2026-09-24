@@ -26,7 +26,10 @@ from nomad_eosc_galaxy_actions.actions.find_peaks.models import (
     RunGalaxyWorkflowInput,
     RunGalaxyWorkflowResult,
 )
-from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_spectrum
+from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import (
+    resolve_api_key,
+    resolve_spectrum,
+)
 
 # Step layout of Galaxy-Workflow-XPS_peak_finding.ga — specific to this one
 # workflow, not to galaxy_client's generic upload_and_invoke().
@@ -81,7 +84,7 @@ def run_galaxy_workflow(data: RunGalaxyWorkflowInput) -> RunGalaxyWorkflowResult
         peak_detection["height"] = data.height
 
     result = galaxy_client.upload_and_invoke(
-        api_key=data.galaxy_api_key.get_secret_value(),
+        api_key=resolve_api_key(data.galaxy_api_key),
         workflow_id=entry_point.galaxy_workflow_id,
         file_path=data.spectrum_path,
         # TODO: pass file_type='auto' once galaxyproject/galaxy#23273 lands —
@@ -106,7 +109,7 @@ def poll_galaxy_invocation(
     which sleeps between calls — polling does not block inside one activity."""
     entry_point = _galaxy_entry_point()
     result = galaxy_client.poll_invocation(
-        api_key=data.galaxy_api_key.get_secret_value(),
+        api_key=resolve_api_key(data.galaxy_api_key),
         invocation_id=data.invocation_id,
         galaxy_url=entry_point.galaxy_url,
     )
@@ -123,7 +126,7 @@ def download_galaxy_result(data: DownloadGalaxyResultInput) -> str:
     artifacts_dir = action_instance_artifacts_dir(data.action_instance_id)
     output_path = os.path.join(artifacts_dir, "result.nxs")
     return galaxy_client.download_dataset(
-        api_key=data.galaxy_api_key.get_secret_value(),
+        api_key=resolve_api_key(data.galaxy_api_key),
         dataset_id=data.dataset_id,
         output_path=output_path,
         galaxy_url=entry_point.galaxy_url,

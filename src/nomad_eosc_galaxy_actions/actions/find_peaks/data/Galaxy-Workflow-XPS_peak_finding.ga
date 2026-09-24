@@ -1,6 +1,6 @@
 {
     "a_galaxy_workflow": "true",
-    "annotation": "",
+    "annotation": "Finds peaks in an XPS spectrum (NXxps) with scipy.signal.find_peaks, and writes the detected peaks back into the NeXus file.",
     "comments": [],
     "creator": [
         {
@@ -18,13 +18,13 @@
     },
     "steps": {
         "0": {
-            "annotation": "",
+            "annotation": "XPS spectrum in the NXxps NeXus format.",
             "content_id": null,
             "errors": null,
             "id": 0,
             "input_connections": {},
             "inputs": [],
-            "label": null,
+            "label": "XPS spectrum",
             "name": "Input dataset",
             "outputs": [],
             "position": {
@@ -85,7 +85,13 @@
             "type": "tool",
             "uuid": "cb93d7d2-0bfc-452a-9c0d-955fb2a77e8c",
             "when": null,
-            "workflow_outputs": []
+            "workflow_outputs": [
+                {
+                    "label": "annotated_spectrum",
+                    "output_name": "output_nxs",
+                    "uuid": "b20d5591-a5f8-42fd-8e73-ae380a85d82b"
+                }
+            ]
         }
     },
     "tags": [],

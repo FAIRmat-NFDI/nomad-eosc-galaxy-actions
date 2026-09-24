@@ -12,14 +12,13 @@ Installing a NOMAD plugin has two parts: getting the Python package into the env
 
 2. Register it as a workspace package in the root `pyproject.toml`: add `"nomad-eosc-galaxy-actions"` to the plugin `dependencies` list, and `nomad-eosc-galaxy-actions = { workspace = true }` under `[tool.uv.sources]`. Then run `uv sync`.
 
-3. Add all three entry points to the root `nomad.yaml`:
+3. Add both entry points to the root `nomad.yaml`:
 
    ```yaml
    plugins:
      entry_points:
        include:
          - "nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action"
-         - "nomad_eosc_galaxy_actions.schema_packages.find_peaks:find_peaks_schema_package"
          - "nomad_eosc_galaxy_actions.example_uploads:find_peaks_example_upload"
        options:
          nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action:
@@ -32,11 +31,14 @@ Installing a NOMAD plugin has two parts: getting the Python package into the env
    uploads*; but it's the fastest way for anyone else to try this plugin, see
    [Use This Plugin](use_this_plugin.md).
 
+   There's no separate schema package to enable: triggering happens through NOMAD's generic **Actions** page, not through a bespoke entry, see [Use This Plugin](use_this_plugin.md) and
+   [Explanation](../explanation/explanation.md#handling-secrets) for why.
+
 ## In a (production / Oasis deployment)
 
 - Once this plugin is published to PyPI: add it, with a pinned version, to `pyproject.toml`'s `[project.optional-dependencies].plugins` list, alongside the other plugin packages there.
 - Until then: install it as a git dependency in that same list instead, e.g `"nomad-eosc-galaxy-actions @ git+https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions.git@<tag>"`.
-- Ensure that all three entry points are activated in your NOMAD configuration (e.g., your `nomad.yaml`).
+- Ensure that both entry points are activated in your NOMAD configuration (e.g., your `nomad.yaml`).
 
 ## Import the workflow
 

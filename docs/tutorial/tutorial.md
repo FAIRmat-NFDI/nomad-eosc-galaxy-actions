@@ -89,9 +89,7 @@ You'll need [`uv`](https://docs.astral.sh/uv/){:target="_blank" rel="noopener"} 
 
 This part needs a running NOMAD deployment with this plugin installed (see [Install This Plugin](../how_to/install_this_plugin.md)) and an XPS entry already in it (for example, converted by `pynxtools-xps`).
 
-Don't have an NXxps file handy? On the *Uploads* page, **Add example uploads** includes
-**XPS Peak Finding via Galaxy** (a spectrum and an almost-ready trigger entry
-bundled together) so you can skip straight to step 3 below.
+Don't have an NXxps file handy? On the *Uploads* page, **Add example uploads** includes **XPS Peak Finding via Galaxy** (a ready-to-use spectrum) so you can skip straight to step 3 below.
 
 1. Bring up Temporal and a CPU action worker (from the `nomad-distro-dev` repo root):
 
@@ -100,11 +98,10 @@ bundled together) so you can skip straight to step 3 below.
    uv run poe cpuworker
    ```
 
-2. In the NOMAD GUI, create a new **Find Peaks Trigger** entry in the same upload as your XPS spectrum (or a different, unpublished one — see the limitation in
-   [Use This Plugin](../how_to/use_this_plugin.md)).
+2. Open the XPS spectrum's entry in the NOMAD GUI and copy its `entry_id` from the overview page.
 
-3. Reference the spectrum entry, enter your Galaxy API key, optionally set `prominence`/`distance`/`height`, and click **Find Peaks**.
+3. In the main menu, open **Actions** and start a new run of **find_peaks_action** (or use the **Run action** button on the upload itself). NOMAD auto-generates the form from the workflow's own input model — fill in `spectrum_entry_id` (from step 2), a Galaxy API key, and optionally `prominence`/`distance`/`height`, then run it. (Triggering happens here, through NOMAD's generic Actions form, rather than through a bespoke schema entry — see [Explanation](../explanation/explanation.md#handling-secrets) for why.)
 
-4. Click **Get Action Status** (or wait — it's checked automatically right after triggering) until `workflow_status` reads `COMPLETED`. Behind the scenes this is running exactly the same steps as Part 1, plus reading the spectrum from NOMAD's upload storage first and writing the result back into NOMAD's upload storage last.
+4. Watch its status in the Actions view move to `COMPLETED`. Behind the scenes this is running exactly the same steps as Part 1, plus reading the spectrum from NOMAD's upload storage first and writing the result back into NOMAD's upload storage last.
 
 5. A new entry now exists in the upload: the original spectrum's data, with peaks added as an `NXfit`/`NXpeak` group, fully searchable like any other NOMAD quantity.

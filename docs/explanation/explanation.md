@@ -19,8 +19,8 @@ A NOMAD **Action** is a plugin mechanism for triggering a long-running external 
 `find_peaks` (below) follows one common shape for this kind of Action — read data out of NOMAD, hand it to Galaxy, wait for the run, write the result back — but that's a pattern this plugin's Actions tend to follow, not a contract every Action must:
 
 ```
-NOMAD entry
-     │  a button on NOMAD triggers the Action
+Something triggers the Action
+     │  NOMAD's generic Actions form, a schema entry's button, a schedule, ...
      ▼
 NOMAD Action
      │  ① read the relevant data out of NOMAD upload storage
@@ -32,7 +32,7 @@ NOMAD Action
 New/updated NOMAD entry, linked back to the source
 ```
 
-How an Action gets *triggered* varies too — `find_peaks` is a button on a NOMAD entry, but nothing about the Actions mechanism requires that: a future Action could just as well be triggered from NOMAD's generic `/actions` interface, or run unattended on a schedule (e.g. a cron job) with no NOMAD-side click at all. Adding a new Action means whatever fits its own trigger and data flow — the `find_peaks` implementation is a starting reference, not a mechanism to conform to.
+How an Action gets *triggered* varies — `find_peaks` (below) uses NOMAD's generic `/actions` form, but nothing about the Actions mechanism requires that: a future Action could just as well be triggered from a button on a schema entry, or run unattended on a schedule (e.g. a cron job) with no NOMAD-side click at all. Adding a new Action means whatever fits its own trigger and data flow — see [Handling secrets](#handling-secrets) below for why `find_peaks` specifically avoids the schema-entry-button approach.
 
 ## `find_peaks`: the XPS peak finding action currently implemented
 
@@ -40,7 +40,7 @@ How an Action gets *triggered* varies too — `find_peaks` is a button on a NOMA
 
 ```
 XPS entry in NOMAD
-       │  "Find Peaks" button on a small entry referencing the spectrum
+       │  triggered from NOMAD's Actions page, spectrum_entry_id as input
        ▼
 NOMAD Action (this plugin)
        │  ① read the spectrum's NeXus file out of NOMAD upload storage
@@ -60,7 +60,19 @@ This plugin's code depends on some specifics of `pynxtools_peak_finding` and `XP
 
 - **Output parameter names**: `poll_invocation` (in `galaxy_client.py`) reads completed   job outputs by name and looks specifically for `output_nxs` (the annotated NeXus file) when deciding what to download. If the tool's `<data name="...">` output names ever change, this plugin needs updating too.
 - **The workflow's step layout**: `activities/find_peaks/activities.py` hardcodes step index `"0"` as the data-input step and `"1"` as the tool step, matching `Galaxy-Workflow-XPS_peak_finding.ga`'s current two-step layout. A workflow restructure (e.g. inserting a step before the tool) would need this updated.
-- **The workflow doesn't mark any step as an explicit workflow output** (`"workflow_outputs": []` in the `.ga` file for both steps), so `invocation['outputs']` stays empty. `poll_invocation` reads each step's *job* state and outputs directly instead, which always works regardless of whether outputs are declared, and merges in `invocation['outputs']` on top for the labels it does have. Marking explicit workflow outputs in a future version of the workflow wouldn't break anything on the NOMAD side -- those labels would just start showing up too.
+- **Only the tool step's `output_nxs` is marked as an explicit workflow output** (labeled `annotated_spectrum` in the workflow's `.ga` file's `workflow_outputs`), so `invocation['outputs']` carries that one label. `poll_invocation` doesn't rely on it, though: it reads each step's *job* state and outputs directly as the base, and merges `invocation['outputs']` on top -- so it keeps working unchanged regardless of which (if any) outputs a given workflow version declares.
+
+### Handling secrets
+
+`find_peaks` is triggered exclusively through NOMAD's `/actions` form, not through a custom schema entry with its own trigger button -- an earlier version of this plugin did have such an entry (`FindPeaksTrigger`), and it was removed specifically over how it had
+to handle the Galaxy API key.
+
+Each Galaxy-related action needs per-user Galaxy API key. As NOMAD's ELN system has no encrypted-secret quantity type, we cannot store the API key there. Therefore, it is not a good idea to create an Action trigger within a regular NOMAD entry to run the Galaxy-related actions.
+unprotected there.
+
+The generic `/actions` form doesn't have this problem: it's auto-generated from the workflow's own Pydantic input model (`FindPeaksWorkflowInput`), and `galaxy_api_key` is typed as `SecretStr` there. NOMAD's Actions framework wraps Temporal's payloads in an encryption codec for any non-development deployment, so a key submitted this way is encrypted at rest, not just masked in logs. This is also exactly the "Individual user secrets" pattern the [NOMAD Actions documentation](https://nomad-lab.eu/prod/v1/staging/docs/howto/plugins/types/actions.html#individual-user-secrets){:target="_blank" rel="noopener"} itself recommends for per-user credentials.
+
+`galaxy_api_key` is optional in that same input model: leaving it empty falls back to the worker's own `GALAXY_API_KEY` environment variable, matching NOMAD's other documented pattern (see [NOMAD docs > ... > "Institute-wide secrets"](https://nomad-lab.eu/prod/v1/staging/docs/howto/plugins/types/actions.html#institute-wide-secrets){:target="_blank" rel="noopener"})for a key shared across a deployment rather than tied to one person.
 
 ## Why a workflow, not the bare tool
 

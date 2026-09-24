@@ -8,12 +8,12 @@
 from pydantic import BaseModel, Field, SecretStr, field_serializer
 
 
-def _serialize_secret(value: SecretStr) -> str:
+def _serialize_secret(value: SecretStr | None) -> str | None:
     """Expose the secret's plain value in JSON. Temporal serializes
     activity/workflow inputs with `model_dump_json`, so without this the
     activity on the other end would receive the masked placeholder instead
     of the real key."""
-    return value.get_secret_value()
+    return value.get_secret_value() if value is not None else None
 
 
 class BaseWorkflowInput(BaseModel):
@@ -34,8 +34,11 @@ class FindPeaksWorkflowInput(BaseWorkflowInput):
     spectrum_entry_id: str = Field(
         ..., description="NOMAD entry ID of the source XPS spectrum."
     )
-    galaxy_api_key: SecretStr = Field(
-        ..., description="API key for the Galaxy account the action runs as."
+    galaxy_api_key: SecretStr | None = Field(
+        None,
+        description="API key for the Galaxy account the action runs as. Leave "
+        "unset to use the worker's own GALAXY_API_KEY environment variable "
+        "(an institute-wide/shared key) instead.",
     )
     prominence: float | None = Field(
         None, description="Forwarded to scipy.signal.find_peaks via the Galaxy tool."
@@ -48,7 +51,7 @@ class FindPeaksWorkflowInput(BaseWorkflowInput):
     )
 
     @field_serializer("galaxy_api_key", when_used="json")
-    def _dump_galaxy_api_key(self, value: SecretStr) -> str:
+    def _dump_galaxy_api_key(self, value: SecretStr | None) -> str | None:
         return _serialize_secret(value)
 
 
@@ -68,7 +71,7 @@ class ReadSpectrumInput(BaseModel):
 class RunGalaxyWorkflowInput(BaseModel):
     """Input for the activity that uploads to Galaxy and invokes the workflow."""
 
-    galaxy_api_key: SecretStr
+    galaxy_api_key: SecretStr | None = None
     spectrum_path: str = Field(
         ..., description="Local path, as returned by read_spectrum."
     )
@@ -77,7 +80,7 @@ class RunGalaxyWorkflowInput(BaseModel):
     height: float | None = None
 
     @field_serializer("galaxy_api_key", when_used="json")
-    def _dump_galaxy_api_key(self, value: SecretStr) -> str:
+    def _dump_galaxy_api_key(self, value: SecretStr | None) -> str | None:
         return _serialize_secret(value)
 
 
@@ -87,11 +90,11 @@ class RunGalaxyWorkflowResult(BaseModel):
 
 
 class PollGalaxyInvocationInput(BaseModel):
-    galaxy_api_key: SecretStr
+    galaxy_api_key: SecretStr | None = None
     invocation_id: str
 
     @field_serializer("galaxy_api_key", when_used="json")
-    def _dump_galaxy_api_key(self, value: SecretStr) -> str:
+    def _dump_galaxy_api_key(self, value: SecretStr | None) -> str | None:
         return _serialize_secret(value)
 
 
@@ -104,12 +107,12 @@ class PollGalaxyInvocationResult(BaseModel):
 
 
 class DownloadGalaxyResultInput(BaseModel):
-    galaxy_api_key: SecretStr
+    galaxy_api_key: SecretStr | None = None
     dataset_id: str
     action_instance_id: str
 
     @field_serializer("galaxy_api_key", when_used="json")
-    def _dump_galaxy_api_key(self, value: SecretStr) -> str:
+    def _dump_galaxy_api_key(self, value: SecretStr | None) -> str | None:
         return _serialize_secret(value)
 
 
