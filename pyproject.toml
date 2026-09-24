@@ -38,8 +38,6 @@ dev = [
     "pytest",
     "pre-commit",
     "cruft",
-]
-docs = [
     "mkdocs",
     "mkdocs-material",
     "mkdocs-material-extensions",
