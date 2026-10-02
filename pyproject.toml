@@ -39,6 +39,7 @@ dev = [
     "pre-commit",
     "cruft",
     "mkdocs",
+    "mkdocs-click",
     "mkdocs-material",
     "mkdocs-material-extensions",
 ]
