@@ -7,7 +7,6 @@ on:
 env:
   UV_VERSION: 0.9
   PYTHON_VERSION: 3.12
-  UV_SYSTEM_PYTHON: true
 
 jobs:
   cff-version-check:
@@ -47,10 +46,9 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install dependencies
-        run: |
-          uv pip install -e ".[dev]"
+        run: uv sync --extra dev
       - name: Test with pytest
-        run: pytest tests/
+        run: uv run pytest tests/
 
   build:
     name: Build Package
