@@ -1,6 +1,8 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 ![](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/actions/workflows/actions.yml/badge.svg)
 ![](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/actions/workflows/mkdocs-deploy.yml/badge.svg)
+[![DOI](https://zenodo.org/badge/759916501.svg)](https://doi.org/10.5281/zenodo.23110600)
+
 
 # `nomad-eosc-galaxy-actions`: NOMAD ↔ Galaxy EOSC interoperability demonstrator
 
@@ -13,3 +15,7 @@ More information about this plugin is available in the [documentation](https://f
 ## Contact person in FAIRmat for this plugin
 
 Lukas Pielsticker
+
+## How to cite this work
+
+Pielsticker, L., Grüning, B., Krieger, M., & Weber, H. B. (2026). nomad-eosc-galaxy-actions: A NOMAD Actions plugin for the EOSC demonstrator with Galaxy. (Version v0.1.0) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23110601
