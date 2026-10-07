@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nomad-eosc-galaxy-actions"
-version = "0.1.0"
+dynamic = ["version"]
 description = "NOMAD Action that sends an XPS spectrum to Galaxy for peak finding and links the result back (EOSC demonstrator)."
 readme = "README.md"
 license = { file = "LICENSE" }
