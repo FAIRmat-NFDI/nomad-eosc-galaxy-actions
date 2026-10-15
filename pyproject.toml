@@ -52,6 +52,7 @@ dev = [
 [project.entry-points.'nomad.plugin']
 find_peaks_action = "nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action"
 find_peaks_example_upload = "nomad_eosc_galaxy_actions.example_uploads:find_peaks_example_upload"
+zenodo_harvest_action = "nomad_eosc_galaxy_actions.actions.zenodo_harvest:zenodo_harvest_action"
 
 
 [tool.setuptools.packages.find]
