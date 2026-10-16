@@ -11,9 +11,13 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import prepare_run
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
+        prepare_run,
+        search_zenodo,
+    )
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
         PrepareRunInput,
+        SearchZenodoInput,
         ZenodoHarvestWorkflowInput,
     )
 
@@ -39,4 +43,17 @@ class ZenodoHarvestWorkflow:
             retry_policy=retry_policy,
         )
 
-        return {"run_dir": prepared.run_dir, "dry_run": data.dry_run}
+        # Long timeout: Zenodo may ask to wait up to a minute when rate-limited.
+        searched = await workflow.execute_activity(
+            search_zenodo,
+            SearchZenodoInput(run_dir=prepared.run_dir, max_records=data.max_records),
+            start_to_close_timeout=timedelta(minutes=15),
+            retry_policy=retry_policy,
+        )
+
+        return {
+            "run_dir": prepared.run_dir,
+            "dry_run": data.dry_run,
+            "candidates": searched.candidates,
+            "rejected": searched.rejected,
+        }

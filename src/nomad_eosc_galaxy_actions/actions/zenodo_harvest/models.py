@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 class ZenodoHarvestWorkflowInput(BaseModel):
     """Input of one harvest run. NOMAD renders the `/actions` form from it.
 
-    Unlike find-peaks, no `upload_id` is needed: a harvest run creates its own
-    uploads (one per Zenodo record version) instead of working inside one.
+    No `upload_id` is needed: a harvest run does not work inside an existing
+    project; it creates its own projects, one per Zenodo record version.
     """
 
     user_id: str = Field(
@@ -20,7 +20,7 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     dry_run: bool = Field(
         True,
-        description="Search, plan and convert, but do not create NOMAD uploads.",
+        description="Search, plan and convert, but do not create NOMAD projects.",
     )
     max_records: int | None = Field(
         None,
@@ -46,3 +46,19 @@ class PrepareRunResult(BaseModel):
     run_config_path: str = Field(
         ..., description="Path of run_config.json inside run_dir."
     )
+
+
+class SearchZenodoInput(BaseModel):
+    """Input for the activity that searches Zenodo."""
+
+    run_dir: str
+    max_records: int | None = None
+
+
+class SearchZenodoResult(BaseModel):
+    """Only counts and a path: the records themselves stay in candidates.json,
+    because Temporal limits the size of activity results."""
+
+    candidates_path: str
+    candidates: int
+    rejected: int

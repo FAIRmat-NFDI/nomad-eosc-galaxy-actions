@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "nomad-lab>=1.4.3",
     "bioblend",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +62,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 nomad_eosc_galaxy_actions = [
     "actions/find_peaks/data/*.ga",
+    "actions/zenodo_harvest/data/*.json",
     "example_uploads/find_peaks/*",
 ]
 
