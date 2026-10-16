@@ -5,6 +5,31 @@
     standalone scripts (not part of the installed package) in [`scripts`](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/tree/main/scripts){:target="_blank" rel="noopener"},
     and the Galaxy-team-facing demo in [`examples/galaxy_demo`](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/tree/main/examples/galaxy_demo){:target="_blank" rel="noopener"}.
 
+## Branching model
+
+This plugin follows the same branching model as the core NOMAD packages.
+
+| Branch | Role |
+|---|---|
+| `develop` | Default branch. All regular development PRs target this branch. |
+| `main` | Released versions only. Only `release/*` branches are merged here, so its history is the release history. |
+| `release/vX.Y.Z` | Temporary release branch, created from `develop` and merged into `main`. The version may carry a pre-release suffix, e.g. `release/vX.Y.Z-beta` or `release/vX.Y.Z-rc1`. |
+
+| Activity | Branch |
+|---|---|
+| Feature development | `develop` |
+| PR review and integration | `develop` |
+| Selecting changes for a release | `release/vX.Y.Z` |
+| Release-specific bug fixes | `release/vX.Y.Z` |
+| Published release history | `main` |
+| Porting release fixes back to ongoing development | Merge `release/vX.Y.Z` back into `develop` |
+
+The `Check if source is release/*` workflow
+([`.github/workflows/check-source-is-release.yml`](https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions/blob/develop/.github/workflows/check-source-is-release.yml){:target="_blank" rel="noopener"})
+allows PRs into `main` only from `release/*` branches. PRs from any other branch, **including `develop`**,
+fail this check. It is enforced by marking it as a required status check in the branch protection rule
+for `main`.
+
 ## Setup
 
 Requires Python 3.10+. We recommend [`uv`](https://github.com/astral-sh/uv){:target="_blank" rel="noopener"}, an extremely fast Python package and project manager; a more classical `venv`/`pip`
@@ -24,7 +49,8 @@ approach works too.
 ## Development installation
 
 ```console
-git clone https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions.git
+git clone https://github.com/FAIRmat-NFDI/nomad-eosc-galaxy-actions.git \
+    --branch develop
 cd nomad-eosc-galaxy-actions
 ```
 
@@ -75,9 +101,36 @@ The Galaxy round trip itself isn't exercised by the unit test suite — it needs
 
 ## Contributing on GitHub
 
-Commit your changes on a separate branch and open a pull request. CI checks linting, runs the tests, and builds the docs; once those pass and a review happens, the PR can be merged. Before releasing, keep the version in sync between `pyproject.toml` and `CITATION.cff` — `publish.yml`'s `cff-version-check` job fails the release otherwise.
+Commit your changes on a separate branch created from `develop` and open a pull request against `develop`:
+
+```console
+git switch develop && git pull
+git switch -c <short-descriptive-name>
+# commit your changes, then
+git push -u origin <short-descriptive-name>
+```
+
+Never open a pull request against `main`: it receives only `release/*` branches. CI checks linting, runs the tests, and builds the docs; once those pass and a review happens, the PR can be merged.
 
 Changing something in `docs/`? See [How-to guides > Contribute to the Documentation](contribute_to_the_documentation.md) for the writing conventions, how to build the docs locally, and how to add a new page.
+
+## Release workflow
+
+1. Create the release branch from `develop`:
+
+    ```console
+    git switch develop && git pull
+    git switch -c release/vX.Y.Z
+    git push -u origin release/vX.Y.Z
+    ```
+
+1. Commit only release-specific changes on this branch (version bumps, changelog, last-minute bug fixes). New features keep going into `develop`.
+1. Bump `version` in `CITATION.cff` to `X.Y.Z`, including any pre-release suffix (e.g. `0.1.2-rc1` for the tag `v0.1.2-rc1`). The package version itself comes from the git tag; `publish.yml`'s `cff-version-check` job fails if `CITATION.cff` differs from it.
+1. Open a PR from `release/vX.Y.Z` into `main`. Do not merge yet!
+1. Create a GitHub release with the tag `vX.Y.Z` and select `release/vX.Y.Z` as its target branch. The publish workflow refuses to upload to PyPI if the release does not target `release/vX.Y.Z` or if the tagged commit is not on that branch.
+1. Once CI passes and the release is published to PyPI, merge the PR.
+1. If you fixed anything directly on the release branch, open a PR from `release/vX.Y.Z` into `develop` so the fixes are not lost in ongoing development.
+1. Delete the `release/vX.Y.Z` branch.
 
 ## Developing this plugin as part of NOMAD
 
