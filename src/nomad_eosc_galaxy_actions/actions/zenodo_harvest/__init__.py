@@ -42,6 +42,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
         from nomad.actions import Action  # noqa: PLC0415
 
         from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (  # noqa: PLC0415
+            build_work_list,
             prepare_run,
             search_zenodo,
         )
@@ -52,7 +53,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
         return Action(
             task_queue=self.task_queue,
             workflow=ZenodoHarvestWorkflow,
-            activities=[prepare_run, search_zenodo],
+            activities=[prepare_run, search_zenodo, build_work_list],
         )
 
 

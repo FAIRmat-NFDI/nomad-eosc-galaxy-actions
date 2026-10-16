@@ -12,10 +12,12 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
+        build_work_list,
         prepare_run,
         search_zenodo,
     )
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
+        BuildWorkListInput,
         PrepareRunInput,
         SearchZenodoInput,
         ZenodoHarvestWorkflowInput,
@@ -51,9 +53,19 @@ class ZenodoHarvestWorkflow:
             retry_policy=retry_policy,
         )
 
+        planned = await workflow.execute_activity(
+            build_work_list,
+            BuildWorkListInput(run_dir=prepared.run_dir, run_id=action_instance_id),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=retry_policy,
+        )
+
         return {
             "run_dir": prepared.run_dir,
             "dry_run": data.dry_run,
             "candidates": searched.candidates,
             "rejected": searched.rejected,
+            "work_list_records": planned.records,
+            "work_list_files": planned.files,
+            "skipped_files": planned.skipped,
         }

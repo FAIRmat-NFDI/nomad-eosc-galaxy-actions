@@ -19,7 +19,11 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     CANDIDATES_SCHEMA_VERSION,
     RUN_CONFIG_FILE,
     RUN_CONFIG_SCHEMA_VERSION,
+    SKIPPED_FILES_FILE,
+    STATE_FILE,
+    WORK_LIST_FILE,
     ZENODO_HARVEST_ACTION,
+    build_work_list,
     prepare_run,
     search_zenodo,
     write_candidates,
@@ -30,6 +34,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
+    BuildWorkListInput,
     PrepareRunInput,
     SearchZenodoInput,
     ZenodoHarvestWorkflowInput,
@@ -160,7 +165,7 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
             env.client,
             task_queue=task_queue,
             workflows=[ZenodoHarvestWorkflow],
-            activities=[prepare_run, search_zenodo],
+            activities=[prepare_run, search_zenodo, build_work_list],
             activity_executor=ThreadPoolExecutor(max_workers=2),  # sync activities
         ):
             result = await env.client.execute_workflow(
@@ -181,3 +186,55 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     used = HarvestConfig.model_validate(run_config["harvest_config"])
     assert used.zenodo_url == json.loads(harvest_config_file.read_text())["zenodo_url"]
     assert (run_dir / CANDIDATES_FILE).is_file()
+    # First two hits: 10843653 (zip + README) and 10443995 (small zip + two
+    # context files; its 9.3 GB zip is skipped as too large).
+    assert result["work_list_records"] == 2  # noqa: PLR2004
+    assert result["work_list_files"] == 5  # noqa: PLR2004
+    assert result["skipped_files"] == 1
+    assert json.loads((run_dir / WORK_LIST_FILE).read_text())["run_id"] == workflow_id
+
+
+def _search(run_dir) -> None:
+    ActivityEnvironment().run(search_zenodo, SearchZenodoInput(run_dir=str(run_dir)))
+
+
+def test_build_work_list_activity(tmp_path, actions_fs, harvest_config_file):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _search(run_dir)
+
+    result = ActivityEnvironment().run(
+        build_work_list, BuildWorkListInput(run_dir=str(run_dir), run_id="run-1")
+    )
+
+    assert (result.records, result.skipped) == (6, 1)
+    work_list = json.loads(Path(result.work_list_path).read_text())
+    assert work_list["run_id"] == "run-1"
+    assert sum(len(r["download"]) for r in work_list["records"]) == result.files
+    skipped = json.loads((run_dir / SKIPPED_FILES_FILE).read_text())
+    assert skipped["skipped"][0]["reason"] == "too_large"
+    assert (actions_fs / "artifacts" / STATE_FILE).is_file()  # created on first use
+
+
+def test_build_work_list_activity_skips_resolved_records(
+    tmp_path, actions_fs, harvest_config_file
+):
+    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+
+    with (
+        StateStore(actions_fs / "artifacts" / STATE_FILE) as store,
+        store.transaction(),
+    ):
+        # Record 17312296 has a single archive, Data_v2.zip.
+        store.set_archive_resolved("15920712", "6a2df9509c1a034a4aefae8890da6df0", True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _search(run_dir)
+
+    result = ActivityEnvironment().run(
+        build_work_list, BuildWorkListInput(run_dir=str(run_dir), run_id="run-2")
+    )
+
+    work_list = json.loads(Path(result.work_list_path).read_text())
+    assert "17312296" not in [r["record_id"] for r in work_list["records"]]
+    assert (result.records, result.skipped) == (5, 2)

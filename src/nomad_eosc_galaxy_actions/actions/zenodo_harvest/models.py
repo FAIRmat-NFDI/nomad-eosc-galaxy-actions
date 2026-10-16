@@ -62,3 +62,17 @@ class SearchZenodoResult(BaseModel):
     candidates_path: str
     candidates: int
     rejected: int
+
+
+class BuildWorkListInput(BaseModel):
+    """Input for the activity that compares the candidates with the state."""
+
+    run_dir: str
+    run_id: str = Field(..., description="Written into the work list for Galaxy.")
+
+
+class BuildWorkListResult(BaseModel):
+    work_list_path: str
+    records: int = Field(..., description="Records with something to download.")
+    files: int = Field(..., description="Files to download, context files included.")
+    skipped: int = Field(..., description="Files not downloaded, with a reason.")

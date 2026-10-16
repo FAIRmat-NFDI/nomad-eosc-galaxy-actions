@@ -17,17 +17,20 @@ from typing import Any
 
 from temporalio import activity
 
-from nomad_eosc_galaxy_actions import zenodo_client
+from nomad_eosc_galaxy_actions import work_list, zenodo_client
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
     load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
+    BuildWorkListInput,
+    BuildWorkListResult,
     PrepareRunInput,
     PrepareRunResult,
     SearchZenodoInput,
     SearchZenodoResult,
 )
+from nomad_eosc_galaxy_actions.state_store import StateStore
 
 ZENODO_HARVEST_ACTION = (
     "nomad_eosc_galaxy_actions.actions.zenodo_harvest:zenodo_harvest_action"
@@ -39,6 +42,12 @@ RUN_CONFIG_SCHEMA_VERSION = 1
 CANDIDATES_FILE = "candidates.json"
 # Version of the candidates.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
 CANDIDATES_SCHEMA_VERSION = 1
+WORK_LIST_FILE = "work_list.json"
+SKIPPED_FILES_FILE = "skipped_files.json"
+# Version of the skipped_files.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
+SKIPPED_FILES_SCHEMA_VERSION = 1
+# State shared by all runs, inside NOMAD's persistent action artifacts folder.
+STATE_FILE = Path("zenodo_harvest") / "state.sqlite"
 # Zenodo allows larger pages for authenticated requests.
 PAGE_SIZE_ANONYMOUS = 25
 PAGE_SIZE_AUTHENTICATED = 100
@@ -50,6 +59,12 @@ def _harvest_config() -> HarvestConfig:
 
     entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
     return load_harvest_config(entry_point.harvest_config_path)
+
+
+def _state_path() -> Path:
+    from nomad.actions.manager import action_artifacts_dir  # noqa: PLC0415
+
+    return Path(action_artifacts_dir()) / STATE_FILE
 
 
 def write_run_config(
@@ -157,4 +172,61 @@ def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
         candidates_path=str(path),
         candidates=len(candidates),
         rejected=len(rejections),
+    )
+
+
+def write_work_list(
+    run_dir: str | Path,
+    content: dict[str, Any],
+    skipped: list[work_list.SkippedFile],
+) -> Path:
+    """Write `work_list.json` (for Galaxy) and `skipped_files.json` (for the report).
+
+    The skipped files stay out of the work list, which is Galaxy's input.
+    """
+    run_dir = Path(run_dir)
+    skipped_content = {
+        "schema_version": SKIPPED_FILES_SCHEMA_VERSION,
+        "skipped": [file.model_dump(mode="json") for file in skipped],
+    }
+    (run_dir / SKIPPED_FILES_FILE).write_text(
+        json.dumps(skipped_content, indent=2), encoding="utf-8"
+    )
+    path = run_dir / WORK_LIST_FILE
+    path.write_text(json.dumps(content, indent=2), encoding="utf-8")
+    return path
+
+
+@activity.defn
+def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
+    """Compare this run's candidates with the state and write the work list.
+
+    Only reads the state; it is updated after Galaxy's manifest is complete.
+    """
+    harvest_config = _harvest_config()
+    settings = work_list.WorkListSettings.model_validate(
+        harvest_config.model_dump(include=set(work_list.WorkListSettings.model_fields))
+    )
+    search_result = json.loads(
+        (Path(data.run_dir) / CANDIDATES_FILE).read_text(encoding="utf-8")
+    )
+    candidates = [
+        zenodo_client.ZenodoRecord.model_validate(record)
+        for record in search_result["candidates"]
+    ]
+    with StateStore(_state_path()) as store:
+        content, skipped = work_list.build_work_list(
+            candidates, store, settings, run_id=data.run_id
+        )
+    path = write_work_list(data.run_dir, content, skipped)
+    records = content["records"]
+    files = sum(len(record["download"]) for record in records)
+    activity.logger.info(
+        "Work list: %d records, %d files, %d skipped", len(records), files, len(skipped)
+    )
+    return BuildWorkListResult(
+        work_list_path=str(path),
+        records=len(records),
+        files=files,
+        skipped=len(skipped),
     )
