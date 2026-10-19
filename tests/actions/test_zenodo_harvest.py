@@ -138,18 +138,15 @@ def harvest_config_file(tmp_path, fake_zenodo, monkeypatch):
     return path
 
 
-# (max_records, expected candidates, expected HTTP requests)
-@pytest.mark.parametrize("case", [(None, 6, 2), (2, 2, 1)])
-def test_search_zenodo_activity(tmp_path, fake_zenodo, harvest_config_file, case):
-    max_records, candidates, requests = case
+def test_search_zenodo_activity(tmp_path, fake_zenodo, harvest_config_file):
     result = ActivityEnvironment().run(
-        search_zenodo, SearchZenodoInput(run_dir=str(tmp_path), max_records=max_records)
+        search_zenodo, SearchZenodoInput(run_dir=str(tmp_path))
     )
 
-    assert (result.candidates, result.rejected) == (candidates, 0)
-    assert len(fake_zenodo.requests) == requests  # max_records avoids extra pages
+    assert (result.candidates, result.rejected) == (6, 0)
+    assert len(fake_zenodo.requests) == len(fake_zenodo.pages)  # all pages read
     content = json.loads(Path(result.candidates_path).read_text())
-    assert len(content["candidates"]) == candidates
+    assert len(content["candidates"]) == result.candidates
 
 
 @pytest.mark.asyncio
@@ -177,7 +174,7 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
 
     assert result["dry_run"] is True
     assert result["run_dir"].startswith(str(actions_fs / workflow_id))
-    assert (result["candidates"], result["rejected"]) == (max_records, 0)
+    assert (result["candidates"], result["rejected"]) == (6, 0)  # full search
 
     run_dir = Path(result["run_dir"])
     run_config = json.loads((run_dir / RUN_CONFIG_FILE).read_text())

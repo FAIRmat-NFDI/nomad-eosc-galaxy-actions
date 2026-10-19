@@ -117,22 +117,14 @@ def test_collect_candidates_marks_duplicate_concepts(recorded_hit):
     assert [(r.record_id, r.reason) for r in rejections] == [("22402765", "duplicate")]
 
 
-def test_collect_candidates_stops_at_max_records(zenodo_hits):
+def test_collect_candidates_reads_all_hits(zenodo_hits):
     hits = iter(zenodo_hits)
     candidates, _ = zenodo_client.collect_candidates(
-        hits, raw_extensions=RAW, licenses=LICENSES, max_records=1
+        hits, raw_extensions=RAW, licenses=LICENSES
     )
 
-    assert len(candidates) == 1
-    assert next(hits)["id"] == zenodo_hits[1]["id"]  # nothing read beyond the limit
-
-
-def test_collect_candidates_zero_max_records_reads_nothing(zenodo_hits):
-    hits = iter(zenodo_hits)
-    assert zenodo_client.collect_candidates(
-        hits, raw_extensions=RAW, licenses=LICENSES, max_records=0
-    ) == ([], [])
-    assert next(hits)["id"] == zenodo_hits[0]["id"]
+    assert len(candidates) == TOTAL_HITS
+    assert next(hits, None) is None  # no limit: every hit is read
 
 
 # iter_search_hits (against a local fake Zenodo server)

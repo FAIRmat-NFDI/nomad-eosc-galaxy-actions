@@ -170,20 +170,17 @@ def collect_candidates(
     *,
     raw_extensions: Iterable[str],
     licenses: Iterable[str],
-    max_records: int | None = None,
 ) -> tuple[list[ZenodoRecord], list[Rejection]]:
     """Parse hits and split them into candidates and rejections.
 
-    Stops reading `hits` once `max_records` candidates are found, so a lazy
-    iterator (e.g. `iter_search_hits`) fetches no more pages than needed.
+    Reads all hits: whether a candidate still has work is only known from the
+    state, so limiting here would return the same records in every run.
     A second hit of the same concept record is rejected as `duplicate`.
     """
     raw_extensions, licenses = tuple(raw_extensions), tuple(licenses)
     candidates: list[ZenodoRecord] = []
     rejections: list[Rejection] = []
     seen_concepts: set[str] = set()
-    if max_records is not None and max_records < 1:
-        return candidates, rejections
     for hit in hits:
         record = parse_record(hit)
         if record.concept_record_id in seen_concepts:
@@ -197,6 +194,4 @@ def collect_candidates(
             rejections.append(Rejection(record_id=record.record_id, reason=reason))
         else:
             candidates.append(record)
-            if max_records is not None and len(candidates) >= max_records:
-                break
     return candidates, rejections

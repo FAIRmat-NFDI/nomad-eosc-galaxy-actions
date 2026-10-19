@@ -25,8 +25,9 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     max_records: int | None = Field(
         None,
         ge=1,
-        description="Process at most this many Zenodo records in this run "
-        "(useful for small test runs). Empty means no limit.",
+        description="Process at most this many Zenodo records with new work in "
+        "this run (useful for small test runs); already handled records do not "
+        "count. Empty means no limit.",
     )
 
 
@@ -52,7 +53,6 @@ class SearchZenodoInput(BaseModel):
     """Input for the activity that searches Zenodo."""
 
     run_dir: str
-    max_records: int | None = None
 
 
 class SearchZenodoResult(BaseModel):
@@ -69,6 +69,9 @@ class BuildWorkListInput(BaseModel):
 
     run_dir: str
     run_id: str = Field(..., description="Written into the work list for Galaxy.")
+    max_records: int | None = Field(
+        None, description="Limit for records with work; empty means no limit."
+    )
 
 
 class BuildWorkListResult(BaseModel):

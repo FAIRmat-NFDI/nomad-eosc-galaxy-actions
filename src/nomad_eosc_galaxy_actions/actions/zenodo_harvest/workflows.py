@@ -48,14 +48,18 @@ class ZenodoHarvestWorkflow:
         # Long timeout: Zenodo may ask to wait up to a minute when rate-limited.
         searched = await workflow.execute_activity(
             search_zenodo,
-            SearchZenodoInput(run_dir=prepared.run_dir, max_records=data.max_records),
+            SearchZenodoInput(run_dir=prepared.run_dir),
             start_to_close_timeout=timedelta(minutes=15),
             retry_policy=retry_policy,
         )
 
         planned = await workflow.execute_activity(
             build_work_list,
-            BuildWorkListInput(run_dir=prepared.run_dir, run_id=action_instance_id),
+            BuildWorkListInput(
+                run_dir=prepared.run_dir,
+                run_id=action_instance_id,
+                max_records=data.max_records,
+            ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
         )

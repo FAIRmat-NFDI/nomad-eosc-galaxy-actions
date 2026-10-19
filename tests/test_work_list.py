@@ -168,6 +168,49 @@ def test_build_work_list_lists_only_records_with_work(store):
     assert _reasons(skipped) == [("v1.zip", "archive_resolved")]
 
 
+def test_max_records_counts_only_records_with_work(store):
+    with store.transaction():
+        store.set_archive_resolved(CID, "done", True)
+    done = _record(("v1.zip", 10, "done"), record_id="101")
+    new = [_record(("d.zip", 10, f"n{i}"), record_id=f"10{i}") for i in (2, 3, 4)]
+
+    content, skipped = build_work_list(
+        [done, *new], store, SETTINGS, run_id="r", max_records=2
+    )
+
+    # The handled record does not use up the limit; 104 waits for a later run.
+    assert [r["record_id"] for r in content["records"]] == ["102", "103"]
+    assert _reasons(skipped) == [("v1.zip", "archive_resolved")]
+
+
+def test_repeated_runs_reach_the_end_of_the_list(store):
+    # Same search result every run; each run's archives are then resolved.
+    records = [_record(("d.zip", 10, f"n{i}"), record_id=str(i)) for i in range(5)]
+    planned = []
+    for run in range(3):
+        content, _ = build_work_list(
+            records, store, SETTINGS, run_id=str(run), max_records=2
+        )
+        planned.append([r["record_id"] for r in content["records"]])
+        with store.transaction():
+            for entry in content["records"]:
+                for file in entry["download"]:
+                    store.set_archive_resolved(CID, file["md5"], True)
+
+    assert planned == [["0", "1"], ["2", "3"], ["4"]]
+
+
+@pytest.mark.parametrize("case", [(None, 3), (3, 3), (5, 3)])
+def test_max_records_limits(store, case):
+    max_records, expected = case
+    records = [_record(("d.zip", 10, f"n{i}"), record_id=str(i)) for i in range(3)]
+
+    content, _ = build_work_list(
+        records, store, SETTINGS, run_id="r", max_records=max_records
+    )
+    assert len(content["records"]) == expected
+
+
 def test_build_work_list_on_recorded_hits(store, zenodo_hits):
     settings = SETTINGS.model_copy(update={"max_archive_bytes": 2_000_000_000})
     records = [parse_record(hit) for hit in zenodo_hits]

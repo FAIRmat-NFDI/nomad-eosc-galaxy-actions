@@ -160,7 +160,6 @@ def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
         hits,
         raw_extensions=harvest_config.raw_extensions,
         licenses=harvest_config.licenses,
-        max_records=data.max_records,
     )
     path = write_candidates(
         data.run_dir, harvest_config.zenodo_query, candidates, rejections
@@ -216,7 +215,11 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
     ]
     with StateStore(_state_path()) as store:
         content, skipped = work_list.build_work_list(
-            candidates, store, settings, run_id=data.run_id
+            candidates,
+            store,
+            settings,
+            run_id=data.run_id,
+            max_records=data.max_records,
         )
     path = write_work_list(data.run_dir, content, skipped)
     records = content["records"]

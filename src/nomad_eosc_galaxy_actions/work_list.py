@@ -108,8 +108,12 @@ def build_work_list(
     store: StateStore,
     settings: WorkListSettings,
     run_id: str,
+    max_records: int | None = None,
 ) -> tuple[dict[str, Any], list[SkippedFile]]:
     """Build the content of `work_list.json` and the list of skipped files.
+
+    `max_records` limits the records **with work**, so already handled
+    records never use up the limit; the rest are picked up by later runs.
 
     Each listed record carries its metadata (context for the conversion),
     the files to download and `known_sha256`: raw files of the same concept
@@ -119,6 +123,8 @@ def build_work_list(
     records: list[dict[str, Any]] = []
     skipped: list[SkippedFile] = []
     for record in candidates:
+        if max_records is not None and len(records) >= max_records:
+            break
         download, record_skipped = plan_record(record, store, settings)
         skipped.extend(record_skipped)
         if not download:
