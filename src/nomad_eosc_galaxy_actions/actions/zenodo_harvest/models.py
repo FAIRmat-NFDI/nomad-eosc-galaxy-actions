@@ -79,3 +79,46 @@ class BuildWorkListResult(BaseModel):
     records: int = Field(..., description="Records with something to download.")
     files: int = Field(..., description="Files to download, context files included.")
     skipped: int = Field(..., description="Files not downloaded, with a reason.")
+    galaxy_configured: bool = Field(
+        ..., description="A Galaxy workflow ID is set in the harvest config."
+    )
+
+
+class RunGalaxyInput(BaseModel):
+    """Input for the activity that sends the work list to Galaxy."""
+
+    work_list_path: str
+    run_id: str
+
+
+class RunGalaxyResult(BaseModel):
+    history_id: str
+    invocation_id: str
+
+
+class PollGalaxyInput(BaseModel):
+    invocation_id: str
+
+
+class PollGalaxyResult(BaseModel):
+    done: bool
+    state: str
+    outputs: dict[str, str] | None = Field(
+        None, description="Output name → Galaxy dataset ID, once finished."
+    )
+
+
+class FetchManifestInput(BaseModel):
+    """Input for the activity that downloads Galaxy's manifest."""
+
+    run_dir: str
+    dataset_id: str
+
+
+class FetchManifestResult(BaseModel):
+    manifest_path: str
+    placeholder: bool = Field(
+        ...,
+        description="True if Galaxy returned the work list unchanged (placeholder "
+        "workflow), so there is nothing to merge into the state.",
+    )

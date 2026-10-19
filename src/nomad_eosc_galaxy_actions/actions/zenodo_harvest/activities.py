@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
-from nomad_eosc_galaxy_actions import work_list, zenodo_client
+from nomad_eosc_galaxy_actions import galaxy_client, work_list, zenodo_client
+from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_api_key
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
     load_harvest_config,
@@ -25,8 +27,14 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
     BuildWorkListResult,
+    FetchManifestInput,
+    FetchManifestResult,
+    PollGalaxyInput,
+    PollGalaxyResult,
     PrepareRunInput,
     PrepareRunResult,
+    RunGalaxyInput,
+    RunGalaxyResult,
     SearchZenodoInput,
     SearchZenodoResult,
 )
@@ -48,6 +56,9 @@ SKIPPED_FILES_FILE = "skipped_files.json"
 SKIPPED_FILES_SCHEMA_VERSION = 1
 # State shared by all runs, inside NOMAD's persistent action artifacts folder.
 STATE_FILE = Path("zenodo_harvest") / "state.sqlite"
+MANIFEST_FILE = "manifest.json"
+# Step index of the work list input in the harvest's Galaxy workflow.
+GALAXY_WORK_LIST_STEP = "0"
 # Zenodo allows larger pages for authenticated requests.
 PAGE_SIZE_ANONYMOUS = 25
 PAGE_SIZE_AUTHENTICATED = 100
@@ -232,4 +243,66 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
         records=len(records),
         files=files,
         skipped=len(skipped),
+        galaxy_configured=bool(harvest_config.galaxy_workflow_id),
     )
+
+
+@activity.defn
+def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
+    """Upload the work list to a new Galaxy history and start the workflow.
+
+    The API key comes from the worker's GALAXY_API_KEY environment variable,
+    so it never appears in the run's inputs, files or logs.
+    """
+    harvest_config = _harvest_config()
+    result = galaxy_client.upload_and_invoke(
+        api_key=resolve_api_key(None),
+        workflow_id=harvest_config.galaxy_workflow_id,
+        file_path=data.work_list_path,
+        file_type="json",
+        workflow_input_step=GALAXY_WORK_LIST_STEP,
+        history_name=f"zenodo-harvest-{data.run_id}",
+        galaxy_url=harvest_config.galaxy_url,
+    )
+    activity.logger.info("Galaxy invocation %s started", result["invocation_id"])
+    return RunGalaxyResult(**result)
+
+
+@activity.defn
+def poll_galaxy(data: PollGalaxyInput) -> PollGalaxyResult:
+    """Check the invocation's status once; the workflow sleeps between calls."""
+    result = galaxy_client.poll_invocation(
+        api_key=resolve_api_key(None),
+        invocation_id=data.invocation_id,
+        galaxy_url=_harvest_config().galaxy_url,
+    )
+    return PollGalaxyResult(**result)
+
+
+@activity.defn
+def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
+    """Download Galaxy's manifest to `run_dir/manifest.json` and check it.
+
+    The manifest must carry this run's `run_id`, which proves it belongs to
+    the work list that was sent.
+    """
+    path = Path(data.run_dir) / MANIFEST_FILE
+    galaxy_client.download_dataset(
+        api_key=resolve_api_key(None),
+        dataset_id=data.dataset_id,
+        output_path=path,
+        galaxy_url=_harvest_config().galaxy_url,
+    )
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    sent = json.loads((Path(data.run_dir) / WORK_LIST_FILE).read_text("utf-8"))
+    if manifest.get("run_id") != sent["run_id"]:
+        # Downloading again would give the same file, so do not retry.
+        raise ApplicationError(
+            f"Galaxy manifest has run_id {manifest.get('run_id')!r}, "
+            f"expected {sent['run_id']!r}",
+            non_retryable=True,
+        )
+    placeholder = manifest == sent  # the work list came back unchanged
+    if placeholder:
+        activity.logger.info("Galaxy returned the work list unchanged (placeholder)")
+    return FetchManifestResult(manifest_path=str(path), placeholder=placeholder)

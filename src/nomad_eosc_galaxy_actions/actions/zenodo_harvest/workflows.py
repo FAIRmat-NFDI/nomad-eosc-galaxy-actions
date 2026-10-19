@@ -9,19 +9,33 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
         build_work_list,
+        fetch_manifest,
+        poll_galaxy,
         prepare_run,
+        run_galaxy,
         search_zenodo,
     )
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
         BuildWorkListInput,
+        BuildWorkListResult,
+        FetchManifestInput,
+        PollGalaxyInput,
         PrepareRunInput,
+        RunGalaxyInput,
         SearchZenodoInput,
         ZenodoHarvestWorkflowInput,
     )
+
+# Galaxy may need hours for large archives; check once a minute for a day.
+GALAXY_POLL_INTERVAL = timedelta(minutes=1)
+GALAXY_MAX_POLLS = 24 * 60
+# Name of the workflow output that holds the manifest (see the .ga file).
+GALAXY_MANIFEST_OUTPUT = "manifest"
 
 
 @workflow.defn
@@ -64,6 +78,10 @@ class ZenodoHarvestWorkflow:
             retry_policy=retry_policy,
         )
 
+        galaxy = await self._run_galaxy(
+            prepared.run_dir, planned, action_instance_id, retry_policy
+        )
+
         return {
             "run_dir": prepared.run_dir,
             "dry_run": data.dry_run,
@@ -72,4 +90,63 @@ class ZenodoHarvestWorkflow:
             "work_list_records": planned.records,
             "work_list_files": planned.files,
             "skipped_files": planned.skipped,
+            "galaxy": galaxy,
+        }
+
+    async def _run_galaxy(
+        self,
+        run_dir: str,
+        planned: BuildWorkListResult,
+        run_id: str,
+        retry_policy: RetryPolicy,
+    ) -> dict:
+        """Send the work list to Galaxy, wait for it and fetch the manifest."""
+        if planned.records == 0:
+            return {"status": "skipped", "reason": "no_work"}
+        if not planned.galaxy_configured:
+            return {"status": "skipped", "reason": "galaxy_not_configured"}
+
+        started = await workflow.execute_activity(
+            run_galaxy,
+            RunGalaxyInput(work_list_path=planned.work_list_path, run_id=run_id),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=retry_policy,
+        )
+        for _ in range(GALAXY_MAX_POLLS):
+            polled = await workflow.execute_activity(
+                poll_galaxy,
+                PollGalaxyInput(invocation_id=started.invocation_id),
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=retry_policy,
+            )
+            if polled.done:
+                break
+            await workflow.sleep(GALAXY_POLL_INTERVAL)
+        else:
+            raise ApplicationError(
+                f"Timed out waiting for Galaxy invocation {started.invocation_id}"
+            )
+        if polled.state != "ok":
+            raise ApplicationError(
+                f"Galaxy invocation {started.invocation_id} ended in state "
+                f"{polled.state!r}; see history {started.history_id}"
+            )
+        if GALAXY_MANIFEST_OUTPUT not in polled.outputs:
+            raise ApplicationError(
+                f"Galaxy workflow has no output named {GALAXY_MANIFEST_OUTPUT!r}"
+            )
+
+        fetched = await workflow.execute_activity(
+            fetch_manifest,
+            FetchManifestInput(
+                run_dir=run_dir, dataset_id=polled.outputs[GALAXY_MANIFEST_OUTPUT]
+            ),
+            start_to_close_timeout=timedelta(minutes=30),
+            retry_policy=retry_policy,
+        )
+        return {
+            "status": "ok",
+            "history_id": started.history_id,
+            "manifest_path": fetched.manifest_path,
+            "placeholder": fetched.placeholder,
         }
