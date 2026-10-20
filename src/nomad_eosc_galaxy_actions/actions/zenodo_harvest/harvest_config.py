@@ -66,7 +66,7 @@ class HarvestConfig(BaseModel):
     )
     licenses: list[str] = Field(
         description=(
-            "Zenodo licence IDs (as in the records API's metadata.license.id, "
+            "Zenodo license IDs (as in the records API's metadata.license.id, "
             "e.g. 'cc-zero' for CC0) that allow re-publication in NOMAD."
         )
     )

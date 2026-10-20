@@ -85,7 +85,7 @@ def plan_record(
         if _is_ignored(file.key, settings.ignore_patterns):
             continue
         if has_extension(file.key, ARCHIVE_EXTENSIONS):
-            # Without an MD5 the archive cannot be recognised, so it is downloaded.
+            # Without an MD5 the archive cannot be recognized, so it is downloaded.
             if file.md5 and store.is_archive_resolved(cid, file.md5):
                 skip(file, "archive_resolved")
             elif file.size > settings.max_archive_bytes:

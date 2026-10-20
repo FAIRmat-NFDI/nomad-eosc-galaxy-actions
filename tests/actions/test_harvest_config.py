@@ -54,7 +54,7 @@ def test_load_missing_file(tmp_path):
     [
         {"zenodo_request_delay": -1},  # below minimum
         {"max_archive_bytes": 0},  # must be positive
-        {"licences": ["cc-zero"]},  # typo: unknown key
+        {"licences": ["cc-zero"]},  # typo: unknown key  cspell:disable-line
     ],
 )
 def test_load_rejects_invalid_settings(tmp_path, shipped, change):
