@@ -79,6 +79,30 @@ def test_missing_upgrade_step_is_refused(tmp_path):
         StateStore(path, schema_version=2, upgrades={})
 
 
+# Layout of schema version 1, before files got `archive_md5`.
+_V1_FILES = """CREATE TABLE files (concept_record_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL, status TEXT NOT NULL, path TEXT, version_doi TEXT,
+    tool_version TEXT, upload_id TEXT, error TEXT, updated_at TEXT NOT NULL,
+    PRIMARY KEY (concept_record_id, sha256));
+INSERT INTO files VALUES ('c', 'sha-a', 'success', 'a.sxm', NULL, '0.1',
+    NULL, NULL, 'then')"""
+
+
+def test_version_1_file_is_upgraded(tmp_path):
+    path = tmp_path / "state.sqlite"
+    _file_at_version(path, 1, _V1_FILES)
+
+    with StateStore(path) as store:
+        assert store.schema_version == STATE_SCHEMA_VERSION
+        assert store.known_sha256("c") == ["sha-a"]  # rows are kept
+        with store.transaction():
+            store.record_file("c", "sha-b", status="failed", archive_md5="zip")
+        row = store._db.execute(
+            "SELECT archive_md5 FROM files WHERE sha256 = 'sha-b'"
+        ).fetchone()
+    assert row == ("zip",)
+
+
 def test_writes_need_a_transaction(store):
     with pytest.raises(NoTransactionError):
         store.set_archive_resolved(CID, "md5", True)
@@ -157,3 +181,38 @@ def test_two_connections_see_committed_writes(tmp_path):
     thread.start()
     thread.join()
     assert seen == [True]
+
+
+def test_retry_failed_reopens_archive_and_loose_file(store):
+    with store.transaction():
+        store.set_archive_resolved(CID, "zip-1", True)
+        store.set_archive_resolved(CID, "zip-2", True)
+        store.record_file(
+            CID, "sha-a", status="failed", tool_version="0.1", archive_md5="zip-1"
+        )
+        store.record_file(
+            CID, "sha-b", status="success", tool_version="0.1", archive_md5="zip-2"
+        )
+        store.record_file(CID, "sha-c", status="failed", tool_version="0.1")
+        store.record_loose_md5(CID, "md5-c", "sha-c")
+        store.record_file(CID, "sha-d", status="failed", tool_version="0.2")
+
+    with store.transaction():
+        assert store.retry_failed("0.2") == 2  # noqa: PLR2004
+
+    assert store.known_sha256(CID) == ["sha-b", "sha-d"]  # retry is not final
+    assert not store.is_archive_resolved(CID, "zip-1")
+    assert store.is_archive_resolved(CID, "zip-2")  # only successes inside
+    assert not store.is_loose_md5_known(CID, "md5-c")
+
+
+def test_retry_failed_same_version_changes_nothing(store):
+    with store.transaction():
+        store.record_file(CID, "sha-a", status="failed", tool_version="0.1")
+        assert store.retry_failed("0.1") == 0
+    assert store.known_sha256(CID) == ["sha-a"]
+
+
+def test_retry_failed_needs_a_transaction(store):
+    with pytest.raises(NoTransactionError):
+        store.retry_failed("0.1")

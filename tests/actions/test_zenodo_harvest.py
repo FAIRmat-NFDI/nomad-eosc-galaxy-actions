@@ -20,6 +20,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     CANDIDATES_FILE,
     CANDIDATES_SCHEMA_VERSION,
     MANIFEST_FILE,
+    RESULTS_FILE,
     RUN_CONFIG_FILE,
     RUN_CONFIG_SCHEMA_VERSION,
     SKIPPED_FILES_FILE,
@@ -28,6 +29,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     ZENODO_HARVEST_ACTION,
     build_work_list,
     fetch_manifest,
+    merge_state,
     poll_galaxy,
     prepare_run,
     run_galaxy,
@@ -42,6 +44,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
     FetchManifestInput,
+    MergeStateInput,
     PollGalaxyInput,
     PrepareRunInput,
     RunGalaxyInput,
@@ -164,10 +167,13 @@ ALL_ACTIVITIES = [
     run_galaxy,
     poll_galaxy,
     fetch_manifest,
+    merge_state,
 ]
 
 
-async def _run_workflow(workflow_id: str, max_records: int | None = 2) -> dict:
+async def _run_workflow(
+    workflow_id: str, max_records: int | None = 2, dry_run: bool = True
+) -> dict:
     # Time-skipping test server: a local Temporal test server (downloaded on
     # first use) that fast-forwards timers such as the Galaxy polling sleep.
     task_queue = f"test-{uuid.uuid4()}"
@@ -181,7 +187,9 @@ async def _run_workflow(workflow_id: str, max_records: int | None = 2) -> dict:
         ):
             return await env.client.execute_workflow(
                 ZenodoHarvestWorkflow.run,
-                ZenodoHarvestWorkflowInput(user_id="u1", max_records=max_records),
+                ZenodoHarvestWorkflowInput(
+                    user_id="u1", max_records=max_records, dry_run=dry_run
+                ),
                 id=workflow_id,
                 task_queue=task_queue,
             )
@@ -223,6 +231,7 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     assert json.loads((run_dir / WORK_LIST_FILE).read_text())["run_id"] == workflow_id
     # The shipped config has no Galaxy workflow ID.
     assert result["galaxy"] == {"status": "skipped", "reason": "galaxy_not_configured"}
+    assert result["merge"] == {"status": "skipped", "reason": "no_galaxy_run"}
 
 
 def _search(run_dir) -> None:
@@ -325,27 +334,39 @@ def test_poll_galaxy_activity(galaxy_config, case):
     assert (result.outputs or {}).get("manifest") == manifest_id
 
 
+def _fetch(run_dir: Path, results_dataset_id: str | None = None):
+    return ActivityEnvironment().run(
+        fetch_manifest,
+        FetchManifestInput(
+            run_dir=str(run_dir),
+            work_list_path=str(run_dir / WORK_LIST_FILE),
+            manifest_dataset_id="out-1",
+            results_dataset_id=results_dataset_id,
+        ),
+    )
+
+
 def test_fetch_manifest_detects_placeholder(tmp_path, galaxy_config):
     galaxy_config.uploaded = _work_list(tmp_path).read_bytes()  # echoed back
 
-    result = ActivityEnvironment().run(
-        fetch_manifest, FetchManifestInput(run_dir=str(tmp_path), dataset_id="out-1")
-    )
+    result = _fetch(tmp_path)
 
     assert result.placeholder is True
     assert Path(result.manifest_path) == tmp_path / MANIFEST_FILE
+    assert result.results_path is None
 
 
 def test_fetch_manifest_real_output(tmp_path, galaxy_config):
     _work_list(tmp_path)
     galaxy_config.output = json.dumps({"run_id": "run-1", "files": []}).encode()
+    galaxy_config.results = b'{"run_id": "run-1"}'
 
-    result = ActivityEnvironment().run(
-        fetch_manifest, FetchManifestInput(run_dir=str(tmp_path), dataset_id="out-1")
-    )
+    result = _fetch(tmp_path, results_dataset_id="out-2")
 
     assert result.placeholder is False
     assert json.loads(Path(result.manifest_path).read_text())["files"] == []
+    assert Path(result.results_path) == tmp_path / RESULTS_FILE
+    assert Path(result.results_path).read_bytes() == galaxy_config.results
 
 
 def test_fetch_manifest_rejects_other_run(tmp_path, galaxy_config):
@@ -353,9 +374,86 @@ def test_fetch_manifest_rejects_other_run(tmp_path, galaxy_config):
     galaxy_config.output = json.dumps({"run_id": "another-run"}).encode()
 
     with pytest.raises(ApplicationError, match="another-run") as error:
+        _fetch(tmp_path, results_dataset_id="out-2")
+    assert error.value.non_retryable
+    assert ("GET", "/api/datasets/out-2/display") not in galaxy_config.requests
+
+
+def _galaxy_outputs(run_id: str) -> tuple[bytes, bytes]:
+    """A manifest with one converted raw file, and its results."""
+    manifest = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "tool_version": "0.1",
+        "archives": [
+            {
+                "concept_record_id": "c1",
+                "key": "d.zip",
+                "md5": "zip-md5",
+                "status": "extracted",
+            }
+        ],
+        "files": [
+            {
+                "concept_record_id": "c1",
+                "record_id": "r1",
+                "source": "archive",
+                "archive_key": "d.zip",
+                "path": "d/a.sxm",
+                "size": 1,
+                "sha256": "sha-a",
+                "role": "raw",
+                "action": "process",
+            }
+        ],
+    }
+    results = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "files": [{"sha256": "sha-a", "status": "success"}],
+    }
+    return json.dumps(manifest).encode(), json.dumps(results).encode()
+
+
+def test_merge_state_activity(tmp_path, actions_fs):
+    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+
+    manifest, results = _galaxy_outputs("run-1")
+    (tmp_path / MANIFEST_FILE).write_bytes(manifest)
+    (tmp_path / RESULTS_FILE).write_bytes(results)
+
+    summary = ActivityEnvironment().run(
+        merge_state,
+        MergeStateInput(
+            manifest_path=str(tmp_path / MANIFEST_FILE),
+            results_path=str(tmp_path / RESULTS_FILE),
+        ),
+    )
+
+    assert (summary.success, summary.archives_resolved) == (1, 1)
+    with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+        assert store.known_sha256("c1") == ["sha-a"]
+        assert store.is_archive_resolved("c1", "zip-md5")
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        b'{"schema_version": 2, "run_id": "run-1"}',  # unknown layout
+        b'{"schema_version": 1, "run_id": "run-2"}',  # another run
+    ],
+)
+def test_merge_state_rejects_bad_outputs(tmp_path, actions_fs, results):
+    (tmp_path / MANIFEST_FILE).write_bytes(_galaxy_outputs("run-1")[0])
+    (tmp_path / RESULTS_FILE).write_bytes(results)
+
+    with pytest.raises(ApplicationError, match="Cannot merge") as error:
         ActivityEnvironment().run(
-            fetch_manifest,
-            FetchManifestInput(run_dir=str(tmp_path), dataset_id="out-1"),
+            merge_state,
+            MergeStateInput(
+                manifest_path=str(tmp_path / MANIFEST_FILE),
+                results_path=str(tmp_path / RESULTS_FILE),
+            ),
         )
     assert error.value.non_retryable
 
@@ -375,6 +473,59 @@ async def test_workflow_galaxy_round_trip(actions_fs, galaxy_config):
     assert manifest == json.loads((run_dir / WORK_LIST_FILE).read_text())
     polls = [r for r in galaxy_config.requests if r[1] == "/api/jobs/job-1"]
     assert len(polls) == 3  # noqa: PLR2004
+    assert result["merge"] == {"status": "skipped", "reason": "placeholder"}
+
+
+def _real_galaxy(galaxy, workflow_id: str) -> None:
+    """Make the fake Galaxy return a real manifest and results for this run."""
+    galaxy.output, galaxy.results = _galaxy_outputs(workflow_id)
+    galaxy.invocation_outputs |= {"results": {"id": "out-2", "src": "hda"}}
+
+
+@pytest.mark.asyncio
+async def test_workflow_merges_galaxy_outputs(actions_fs, galaxy_config):
+    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+    _real_galaxy(galaxy_config, workflow_id)
+
+    result = await _run_workflow(workflow_id, dry_run=False)
+
+    assert result["galaxy"]["placeholder"] is False
+    assert result["merge"] == {
+        "status": "ok",
+        "success": 1,
+        "failed": 0,
+        "archives_resolved": 1,
+        "archives_unresolved": 0,
+        "retried": 0,
+    }
+    with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+        assert store.known_sha256("c1") == ["sha-a"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_dry_run_leaves_state_unchanged(actions_fs, galaxy_config):
+    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+    _real_galaxy(galaxy_config, workflow_id)
+
+    result = await _run_workflow(workflow_id, dry_run=True)
+
+    assert result["merge"] == {"status": "skipped", "reason": "dry_run"}
+    with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+        assert store.known_sha256("c1") == []
+
+
+@pytest.mark.asyncio
+async def test_workflow_fails_without_results_output(actions_fs, galaxy_config):
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+    galaxy_config.output = _galaxy_outputs(workflow_id)[0]  # no 'results' output
+
+    with pytest.raises(WorkflowFailureError) as error:
+        await _run_workflow(workflow_id, dry_run=False)
+    assert "no output named 'results'" in str(error.value.cause)
 
 
 @pytest.mark.asyncio

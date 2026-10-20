@@ -109,16 +109,30 @@ class PollGalaxyResult(BaseModel):
 
 
 class FetchManifestInput(BaseModel):
-    """Input for the activity that downloads Galaxy's manifest."""
+    """Input for the activity that downloads Galaxy's manifest and results."""
 
     run_dir: str
-    dataset_id: str
+    work_list_path: str = Field(
+        ..., description="The work list sent to Galaxy, to check the manifest."
+    )
+    manifest_dataset_id: str
+    results_dataset_id: str | None = Field(
+        None, description="Missing in the placeholder workflow."
+    )
 
 
 class FetchManifestResult(BaseModel):
     manifest_path: str
+    results_path: str | None = None
     placeholder: bool = Field(
         ...,
         description="True if Galaxy returned the work list unchanged (placeholder "
         "workflow), so there is nothing to merge into the state.",
     )
+
+
+class MergeStateInput(BaseModel):
+    """Input for the activity that merges Galaxy's outputs into the state."""
+
+    manifest_path: str
+    results_path: str

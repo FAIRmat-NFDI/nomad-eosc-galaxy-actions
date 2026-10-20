@@ -29,6 +29,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListResult,
     FetchManifestInput,
     FetchManifestResult,
+    MergeStateInput,
     PollGalaxyInput,
     PollGalaxyResult,
     PrepareRunInput,
@@ -38,6 +39,12 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     SearchZenodoInput,
     SearchZenodoResult,
 )
+from nomad_eosc_galaxy_actions.manifest import (
+    Manifest,
+    MergeSummary,
+    Results,
+    merge_manifest,
+)
 from nomad_eosc_galaxy_actions.state_store import StateStore
 
 ZENODO_HARVEST_ACTION = (
@@ -45,7 +52,7 @@ ZENODO_HARVEST_ACTION = (
 )
 RUN_CONFIG_FILE = "run_config.json"
 # Version of the run_config.json layout. Bump it when a key is renamed,
-# removed or changes meaning, so readers can recognise older files.
+# removed or changes meaning, so readers can recognize older files.
 RUN_CONFIG_SCHEMA_VERSION = 1
 CANDIDATES_FILE = "candidates.json"
 # Version of the candidates.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
@@ -57,6 +64,7 @@ SKIPPED_FILES_SCHEMA_VERSION = 1
 # State shared by all runs, inside NOMAD's persistent action artifacts folder.
 STATE_FILE = Path("zenodo_harvest") / "state.sqlite"
 MANIFEST_FILE = "manifest.json"
+RESULTS_FILE = "results.json"
 # Step index of the work list input in the harvest's Galaxy workflow.
 GALAXY_WORK_LIST_STEP = "0"
 # Zenodo allows larger pages for authenticated requests.
@@ -281,20 +289,27 @@ def poll_galaxy(data: PollGalaxyInput) -> PollGalaxyResult:
 
 @activity.defn
 def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
-    """Download Galaxy's manifest to `run_dir/manifest.json` and check it.
+    """Download Galaxy's manifest (and results) into the run folder and check it.
 
     The manifest must carry this run's `run_id`, which proves it belongs to
     the work list that was sent.
     """
-    path = Path(data.run_dir) / MANIFEST_FILE
-    galaxy_client.download_dataset(
-        api_key=resolve_api_key(None),
-        dataset_id=data.dataset_id,
-        output_path=path,
-        galaxy_url=_harvest_config().galaxy_url,
-    )
+    harvest_config = _harvest_config()
+    run_dir = Path(data.run_dir)
+
+    def download(dataset_id: str, name: str) -> Path:
+        path = run_dir / name
+        galaxy_client.download_dataset(
+            api_key=resolve_api_key(None),
+            dataset_id=dataset_id,
+            output_path=path,
+            galaxy_url=harvest_config.galaxy_url,
+        )
+        return path
+
+    path = download(data.manifest_dataset_id, MANIFEST_FILE)
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    sent = json.loads((Path(data.run_dir) / WORK_LIST_FILE).read_text("utf-8"))
+    sent = json.loads(Path(data.work_list_path).read_text(encoding="utf-8"))
     if manifest.get("run_id") != sent["run_id"]:
         # Downloading again would give the same file, so do not retry.
         raise ApplicationError(
@@ -305,4 +320,30 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
     placeholder = manifest == sent  # the work list came back unchanged
     if placeholder:
         activity.logger.info("Galaxy returned the work list unchanged (placeholder)")
-    return FetchManifestResult(manifest_path=str(path), placeholder=placeholder)
+    results_path = None
+    if data.results_dataset_id:
+        results_path = str(download(data.results_dataset_id, RESULTS_FILE))
+    return FetchManifestResult(
+        manifest_path=str(path), results_path=results_path, placeholder=placeholder
+    )
+
+
+@activity.defn
+def merge_state(data: MergeStateInput) -> MergeSummary:
+    """Merge Galaxy's manifest and results into the state (all or nothing)."""
+    try:
+        manifest = Manifest.model_validate_json(
+            Path(data.manifest_path).read_text(encoding="utf-8")
+        )
+        results = Results.model_validate_json(
+            Path(data.results_path).read_text(encoding="utf-8")
+        )
+        with StateStore(_state_path()) as store:
+            summary = merge_manifest(store, manifest, results)
+    except ValueError as error:  # includes pydantic's ValidationError
+        # The same files would fail again, so do not retry.
+        raise ApplicationError(
+            f"Cannot merge Galaxy outputs: {error}", non_retryable=True
+        ) from error
+    activity.logger.info("State merged: %s", summary)
+    return summary

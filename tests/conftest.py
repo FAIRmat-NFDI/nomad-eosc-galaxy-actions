@@ -91,7 +91,8 @@ class FakeGalaxy(ThreadingHTTPServer):
     for upload (tus), invoke, poll and download.
 
     The workflow behaves like the placeholder: its `manifest` output is the
-    uploaded file, unless `output` is set. `job_states` lists the job state
+    uploaded file, unless `output` is set. Add a `results` entry to
+    `invocation_outputs` to serve `results`. `job_states` lists the job state
     for each poll; the last one repeats.
     """
 
@@ -99,6 +100,7 @@ class FakeGalaxy(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _FakeGalaxyHandler)
         self.uploaded = b""
         self.output: bytes | None = None
+        self.results = b""
         self.job_states = ["ok"]
         self.invocation_outputs = {"manifest": {"id": "out-1", "src": "hda"}}
         self.requests: list[tuple[str, str]] = []
@@ -154,19 +156,20 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
                 else server.job_states[0]
             )
             self._send(200, {"state": state, "outputs": {"out_file1": {"id": "out-1"}}})
-        elif path == "/api/datasets/out-1":
+        elif path in ("/api/datasets/out-1", "/api/datasets/out-2"):
             self._send(
                 200,
                 {
                     "state": "ok",
-                    "name": "manifest",
                     "file_ext": "json",
-                    "download_url": "/api/datasets/out-1/display",
+                    "download_url": f"{path}/display",
                 },
             )
         elif path == "/api/datasets/out-1/display":
             content = server.output if server.output is not None else server.uploaded
             self._send_bytes(200, content)
+        elif path == "/api/datasets/out-2/display":
+            self._send_bytes(200, server.results)
         else:
             self._send(404, {"err_msg": f"unknown {path}"})
 

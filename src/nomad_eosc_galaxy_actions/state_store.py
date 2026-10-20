@@ -9,8 +9,8 @@ A single SQLite file (https://docs.python.org/3/library/sqlite3.html) with
 three tables, all keyed by Zenodo's concept record ID, which groups every
 version of a record:
 
-- `files`: raw files by SHA-256, with their final status. Never process the
-  same content twice.
+- `files`: raw files by SHA-256, with their status and the archive they came
+  from. Never process the same content twice.
 - `loose_md5`: Zenodo MD5 of loose raw files. Skip them before download.
 - `archives`: archives by Zenodo MD5. `resolved` means every raw file inside
   has a final status, so the archive is not downloaded again.
@@ -29,10 +29,12 @@ from pathlib import Path
 # Version of the table layout, stored in the file as `PRAGMA user_version`
 # (https://www.sqlite.org/pragma.html#pragma_user_version). When the layout
 # changes: bump it and add the SQL that upgrades version n to UPGRADES[n].
-STATE_SCHEMA_VERSION = 1
-UPGRADES: dict[int, str] = {}
+STATE_SCHEMA_VERSION = 2
+UPGRADES: dict[int, str] = {
+    1: "ALTER TABLE files ADD COLUMN archive_md5 TEXT",
+}
 
-# Statuses that mean "done, do not process again".
+# Statuses that mean "done, do not process again". `retry` is not final.
 FINAL_STATUSES = ("success", "failed")
 
 _SCHEMA = """
@@ -46,6 +48,7 @@ CREATE TABLE files (
     upload_id TEXT,
     error TEXT,
     updated_at TEXT NOT NULL,
+    archive_md5 TEXT,
     PRIMARY KEY (concept_record_id, sha256)
 );
 CREATE TABLE loose_md5 (
@@ -160,10 +163,10 @@ class StateStore:
         finally:
             self._in_transaction = False
 
-    def _write(self, sql: str, params: tuple) -> None:
+    def _write(self, sql: str, params: tuple) -> sqlite3.Cursor:
         if not self._in_transaction:
             raise NoTransactionError("writes must run inside transaction()")
-        self._db.execute(sql, params)
+        return self._db.execute(sql, params)
 
     # Reads used to build the work list
 
@@ -191,7 +194,7 @@ class StateStore:
         ).fetchone()
         return bool(row and row[0])
 
-    # Writes, used when a manifest is merged (F5)
+    # Writes, used when a manifest is merged
 
     def record_file(  # noqa: PLR0913
         self,
@@ -204,22 +207,26 @@ class StateStore:
         tool_version: str | None = None,
         upload_id: str | None = None,
         error: str | None = None,
+        archive_md5: str | None = None,
     ) -> None:
         """Insert or replace the state of one raw file.
 
         `version_doi` keeps the first version the file was seen in.
+        `archive_md5` is the archive it came from (None for a loose file).
         """
         self._write(
             """
                 INSERT INTO files (concept_record_id, sha256, status, path,
-                    version_doi, tool_version, upload_id, error, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    version_doi, tool_version, upload_id, error, updated_at,
+                    archive_md5)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (concept_record_id, sha256) DO UPDATE SET
                     status = excluded.status, path = excluded.path,
                     version_doi = COALESCE(files.version_doi, excluded.version_doi),
                     tool_version = excluded.tool_version,
                     upload_id = excluded.upload_id, error = excluded.error,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    archive_md5 = excluded.archive_md5
             """,
             (
                 concept_record_id,
@@ -231,6 +238,7 @@ class StateStore:
                 upload_id,
                 error,
                 _now(),
+                archive_md5,
             ),
         )
 
@@ -247,3 +255,27 @@ class StateStore:
             "INSERT OR REPLACE INTO archives VALUES (?, ?, ?, ?)",
             (concept_record_id, md5, int(resolved), _now()),
         )
+
+    def retry_failed(self, tool_version: str) -> int:
+        """Set failed files from another tool version to `retry`.
+
+        Their archives become unresolved and their loose MD5s are forgotten,
+        so the next work list downloads them again. Returns the file count.
+        """
+        failed = "status = 'failed' AND tool_version IS NOT ?"
+        self._write(
+            "UPDATE archives SET resolved = 0, updated_at = ? "
+            "WHERE (concept_record_id, md5) IN (SELECT concept_record_id, "
+            f"archive_md5 FROM files WHERE {failed})",
+            (_now(), tool_version),
+        )
+        self._write(
+            "DELETE FROM loose_md5 WHERE (concept_record_id, sha256) IN "
+            f"(SELECT concept_record_id, sha256 FROM files WHERE {failed})",
+            (tool_version,),
+        )
+        cursor = self._write(
+            f"UPDATE files SET status = 'retry', updated_at = ? WHERE {failed}",
+            (_now(), tool_version),
+        )
+        return cursor.rowcount

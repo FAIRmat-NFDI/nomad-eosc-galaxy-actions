@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
         build_work_list,
         fetch_manifest,
+        merge_state,
         poll_galaxy,
         prepare_run,
         run_galaxy,
@@ -24,6 +25,8 @@ with workflow.unsafe.imports_passed_through():
         BuildWorkListInput,
         BuildWorkListResult,
         FetchManifestInput,
+        FetchManifestResult,
+        MergeStateInput,
         PollGalaxyInput,
         PrepareRunInput,
         RunGalaxyInput,
@@ -34,8 +37,9 @@ with workflow.unsafe.imports_passed_through():
 # Galaxy may need hours for large archives; check once a minute for a day.
 GALAXY_POLL_INTERVAL = timedelta(minutes=1)
 GALAXY_MAX_POLLS = 24 * 60
-# Name of the workflow output that holds the manifest (see the .ga file).
+# Names of the Galaxy workflow outputs; the .ga file must use these labels.
 GALAXY_MANIFEST_OUTPUT = "manifest"
+GALAXY_RESULTS_OUTPUT = "results"
 
 
 @workflow.defn
@@ -78,9 +82,10 @@ class ZenodoHarvestWorkflow:
             retry_policy=retry_policy,
         )
 
-        galaxy = await self._run_galaxy(
+        galaxy, fetched = await self._run_galaxy(
             prepared.run_dir, planned, action_instance_id, retry_policy
         )
+        merge = await self._merge_state(fetched, data.dry_run, retry_policy)
 
         return {
             "run_dir": prepared.run_dir,
@@ -91,6 +96,7 @@ class ZenodoHarvestWorkflow:
             "work_list_files": planned.files,
             "skipped_files": planned.skipped,
             "galaxy": galaxy,
+            "merge": merge,
         }
 
     async def _run_galaxy(
@@ -99,12 +105,12 @@ class ZenodoHarvestWorkflow:
         planned: BuildWorkListResult,
         run_id: str,
         retry_policy: RetryPolicy,
-    ) -> dict:
-        """Send the work list to Galaxy, wait for it and fetch the manifest."""
+    ) -> tuple[dict, FetchManifestResult | None]:
+        """Send the work list to Galaxy, wait for it and fetch its outputs."""
         if planned.records == 0:
-            return {"status": "skipped", "reason": "no_work"}
+            return {"status": "skipped", "reason": "no_work"}, None
         if not planned.galaxy_configured:
-            return {"status": "skipped", "reason": "galaxy_not_configured"}
+            return {"status": "skipped", "reason": "galaxy_not_configured"}, None
 
         started = await workflow.execute_activity(
             run_galaxy,
@@ -139,14 +145,50 @@ class ZenodoHarvestWorkflow:
         fetched = await workflow.execute_activity(
             fetch_manifest,
             FetchManifestInput(
-                run_dir=run_dir, dataset_id=polled.outputs[GALAXY_MANIFEST_OUTPUT]
+                run_dir=run_dir,
+                work_list_path=planned.work_list_path,
+                manifest_dataset_id=polled.outputs[GALAXY_MANIFEST_OUTPUT],
+                results_dataset_id=polled.outputs.get(GALAXY_RESULTS_OUTPUT),
             ),
             start_to_close_timeout=timedelta(minutes=30),
             retry_policy=retry_policy,
         )
-        return {
+        galaxy = {
             "status": "ok",
             "history_id": started.history_id,
             "manifest_path": fetched.manifest_path,
             "placeholder": fetched.placeholder,
         }
+        return galaxy, fetched
+
+    async def _merge_state(
+        self,
+        fetched: FetchManifestResult | None,
+        dry_run: bool,
+        retry_policy: RetryPolicy,
+    ) -> dict:
+        """Write Galaxy's outcome into the state shared by all runs.
+
+        A dry run leaves the state unchanged, so a real run still handles
+        the same files. F6 will create the NOMAD projects before this step.
+        """
+        if fetched is None:
+            return {"status": "skipped", "reason": "no_galaxy_run"}
+        if fetched.placeholder:
+            return {"status": "skipped", "reason": "placeholder"}
+        if fetched.results_path is None:
+            raise ApplicationError(
+                f"Galaxy workflow has no output named {GALAXY_RESULTS_OUTPUT!r}"
+            )
+        if dry_run:
+            return {"status": "skipped", "reason": "dry_run"}
+        merged = await workflow.execute_activity(
+            merge_state,
+            MergeStateInput(
+                manifest_path=fetched.manifest_path,
+                results_path=fetched.results_path,
+            ),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=retry_policy,
+        )
+        return {"status": "ok", **merged.model_dump()}
