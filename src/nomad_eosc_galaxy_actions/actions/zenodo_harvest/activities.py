@@ -20,7 +20,9 @@ from temporalio.exceptions import ApplicationError
 
 from nomad_eosc_galaxy_actions import (
     galaxy_client,
+    mailer,
     nomad_projects,
+    report,
     work_list,
     zenodo_client,
 )
@@ -37,6 +39,8 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListResult,
     CreateProjectsInput,
     CreateProjectsResult,
+    EmailReportInput,
+    EmailReportResult,
     FetchManifestInput,
     FetchManifestResult,
     FetchProjectsInput,
@@ -50,6 +54,8 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     RunGalaxyResult,
     SearchZenodoInput,
     SearchZenodoResult,
+    WriteReportInput,
+    WriteReportResult,
 )
 from nomad_eosc_galaxy_actions.manifest import (
     Manifest,
@@ -78,6 +84,8 @@ STATE_FILE = Path("zenodo_harvest") / "state.sqlite"
 MANIFEST_FILE = "manifest.json"
 RESULTS_FILE = "results.json"
 PROJECTS_DIR = "projects"
+REPORT_FILE = "report.json"
+REPORT_MARKDOWN_FILE = "report.md"
 # Step index of the work list input in the harvest's Galaxy workflow.
 GALAXY_WORK_LIST_STEP = "0"
 # Zenodo allows larger pages for authenticated requests.
@@ -457,3 +465,74 @@ def merge_state(data: MergeStateInput) -> MergeSummary:
         ) from error
     activity.logger.info("State merged: %s", summary)
     return summary
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+@activity.defn
+def write_report(data: WriteReportInput) -> WriteReportResult:
+    """Write `report.json` and `report.md` into the run folder."""
+    run_dir = Path(data.run_dir)
+    manifest = _read_json(run_dir / MANIFEST_FILE)
+    results = _read_json(run_dir / RESULTS_FILE)
+    content = report.build_report(
+        run_config=_read_json(run_dir / RUN_CONFIG_FILE) or {},
+        candidates=_read_json(run_dir / CANDIDATES_FILE) or {},
+        work_list=_read_json(run_dir / WORK_LIST_FILE),
+        skipped_files=_read_json(run_dir / SKIPPED_FILES_FILE),
+        # Placeholder runs return the work list as manifest, so check first.
+        manifest=(
+            Manifest.model_validate(manifest)
+            if manifest and not data.steps.get("galaxy", {}).get("placeholder")
+            else None
+        ),
+        results=Results.model_validate(results) if results else None,
+        steps=data.steps,
+    )
+    report_path = run_dir / REPORT_FILE
+    report_path.write_text(json.dumps(content, indent=2), encoding="utf-8")
+    markdown_path = run_dir / REPORT_MARKDOWN_FILE
+    markdown_path.write_text(report.render_markdown(content), encoding="utf-8")
+    return WriteReportResult(
+        report_path=str(report_path), markdown_path=str(markdown_path)
+    )
+
+
+def _user_email(user_id: str) -> str | None:
+    """Email address of a NOMAD user (needs NOMAD's user management)."""
+    from nomad import datamodel  # noqa: PLC0415
+
+    user = datamodel.User.get(user_id=user_id)
+    return user.email if user else None
+
+
+@activity.defn
+def email_report(data: EmailReportInput) -> EmailReportResult:
+    """Email `report.md` (with `report.json` attached) to the run's user.
+
+    Sends nothing when the worker has no HARVEST_SMTP_HOST (see `mailer`).
+    """
+    try:
+        settings = mailer.SmtpSettings.from_env(os.environ)
+    except mailer.MailConfigError as error:
+        raise ApplicationError(str(error), non_retryable=True) from error
+    if settings is None:
+        return EmailReportResult(sent=False, reason="smtp_not_configured")
+    address = _user_email(data.user_id)
+    if not address:
+        return EmailReportResult(sent=False, reason="no_email_address")
+    content = json.loads(Path(data.report_path).read_text(encoding="utf-8"))
+    message = mailer.build_message(
+        settings.sender,
+        address,
+        subject=f"Zenodo harvest report {(content['started_at'] or '')[:10]}",
+        body=Path(data.markdown_path).read_text(encoding="utf-8"),
+        attachments=[Path(data.report_path)],
+    )
+    try:
+        mailer.send_mail(settings, message)
+    except mailer.MailConfigError as error:
+        raise ApplicationError(str(error), non_retryable=True) from error
+    return EmailReportResult(sent=True)

@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import json
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -309,6 +310,68 @@ class _FakeNomadHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def fake_nomad():
     server = FakeNomad()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+class FakeSmtp(socketserver.ThreadingTCPServer):
+    """Local SMTP server (RFC 5321 basics, no TLS) keeping what it receives.
+
+    `messages` holds (sender, recipients, raw message) per accepted mail.
+    """
+
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), _FakeSmtpHandler)
+        self.messages: list[tuple[str, list[str], bytes]] = []
+
+    @property
+    def port(self) -> int:
+        return self.server_address[1]
+
+
+class _FakeSmtpHandler(socketserver.StreamRequestHandler):
+    server: FakeSmtp
+
+    def _reply(self, line: str) -> None:
+        self.wfile.write(f"{line}\r\n".encode())
+
+    def handle(self):
+        sender, recipients = "", []
+        self._reply("220 fake SMTP")
+        while line := self.rfile.readline():
+            command = line.decode().strip()
+            verb = command[:4].upper()
+            if verb == "EHLO":
+                self._reply("250-fake")
+                self._reply("250 HELP")  # no STARTTLS, no AUTH
+            elif verb == "MAIL":
+                sender, recipients = command.split(":", 1)[1].strip("<> "), []
+                self._reply("250 OK")
+            elif verb == "RCPT":
+                recipients.append(command.split(":", 1)[1].strip("<> "))
+                self._reply("250 OK")
+            elif verb == "DATA":
+                self._reply("354 end with .")
+                data = b""
+                while (chunk := self.rfile.readline()) not in (b".\r\n", b""):
+                    data += chunk
+                self.server.messages.append((sender, recipients, data))
+                self._reply("250 OK")
+            elif verb == "QUIT":
+                self._reply("221 bye")
+                return
+            else:
+                self._reply("250 OK")
+
+
+@pytest.fixture
+def fake_smtp():
+    server = FakeSmtp()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server

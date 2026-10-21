@@ -9,12 +9,13 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
         build_work_list,
         create_projects,
+        email_report,
         fetch_manifest,
         fetch_projects,
         merge_state,
@@ -22,12 +23,14 @@ with workflow.unsafe.imports_passed_through():
         prepare_run,
         run_galaxy,
         search_zenodo,
+        write_report,
     )
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
         BuildWorkListInput,
         BuildWorkListResult,
         CreateProjectsInput,
         CreateProjectsResult,
+        EmailReportInput,
         FetchManifestInput,
         FetchManifestResult,
         FetchProjectsInput,
@@ -36,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
         PrepareRunInput,
         RunGalaxyInput,
         SearchZenodoInput,
+        WriteReportInput,
         ZenodoHarvestWorkflowInput,
     )
 
@@ -100,6 +104,10 @@ class ZenodoHarvestWorkflow:
             )
             merge = await self._merge_state(fetched, projects, retry_policy)
 
+        steps = {"galaxy": galaxy, "nomad": nomad, "merge": merge}
+        report, email = await self._report(
+            prepared.run_dir, steps, data.user_id, retry_policy
+        )
         return {
             "run_dir": prepared.run_dir,
             "dry_run": data.dry_run,
@@ -111,6 +119,8 @@ class ZenodoHarvestWorkflow:
             "galaxy": galaxy,
             "nomad": nomad,
             "merge": merge,
+            "report_path": report,
+            "email": email,
         }
 
     async def _run_galaxy(
@@ -239,6 +249,33 @@ class ZenodoHarvestWorkflow:
             retry_policy=retry_policy,
         )
         return {"status": "ok", **merged.model_dump()}
+
+    async def _report(
+        self, run_dir: str, steps: dict, user_id: str, retry_policy: RetryPolicy
+    ) -> tuple[str, dict]:
+        """Write the report and email it; a failed email does not fail the run."""
+        written = await workflow.execute_activity(
+            write_report,
+            WriteReportInput(run_dir=run_dir, steps=steps),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=retry_policy,
+        )
+        try:
+            emailed = await workflow.execute_activity(
+                email_report,
+                EmailReportInput(
+                    report_path=written.report_path,
+                    markdown_path=written.markdown_path,
+                    user_id=user_id,
+                ),
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=retry_policy,
+            )
+        except ActivityError as error:
+            return written.report_path, {"status": "failed", "error": str(error.cause)}
+        if not emailed.sent:
+            return written.report_path, {"status": "skipped", "reason": emailed.reason}
+        return written.report_path, {"status": "ok"}
 
 
 def _skip_reason(fetched: FetchManifestResult | None, dry_run: bool) -> str | None:

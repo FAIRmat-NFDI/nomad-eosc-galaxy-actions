@@ -23,6 +23,8 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     CANDIDATES_SCHEMA_VERSION,
     MANIFEST_FILE,
     PROJECTS_DIR,
+    REPORT_FILE,
+    REPORT_MARKDOWN_FILE,
     RESULTS_FILE,
     RUN_CONFIG_FILE,
     RUN_CONFIG_SCHEMA_VERSION,
@@ -32,6 +34,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     ZENODO_HARVEST_ACTION,
     build_work_list,
     create_projects,
+    email_report,
     fetch_manifest,
     fetch_projects,
     merge_state,
@@ -40,6 +43,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     run_galaxy,
     search_zenodo,
     write_candidates,
+    write_report,
     write_run_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
@@ -49,6 +53,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
     CreateProjectsInput,
+    EmailReportInput,
     FetchManifestInput,
     FetchProjectsInput,
     MergeStateInput,
@@ -56,6 +61,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     PrepareRunInput,
     RunGalaxyInput,
     SearchZenodoInput,
+    WriteReportInput,
     ZenodoHarvestWorkflowInput,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
@@ -154,6 +160,8 @@ def harvest_config_file(tmp_path, fake_zenodo, monkeypatch):
     entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
     monkeypatch.setattr(entry_point, "harvest_config_path", str(path))
     monkeypatch.delenv("ZENODO_TOKEN", raising=False)
+    for name in ("HOST", "PORT", "FROM", "USER", "PASSWORD"):
+        monkeypatch.delenv(f"HARVEST_SMTP_{name}", raising=False)
     return path
 
 
@@ -187,6 +195,8 @@ ALL_ACTIVITIES = [
     fetch_projects,
     create_projects,
     merge_state,
+    write_report,
+    email_report,
 ]
 
 
@@ -258,6 +268,11 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
             "reason": "no_galaxy_run",
         }
     )
+    report = json.loads(Path(result["report_path"]).read_text())
+    assert report["run_id"] == workflow_id
+    assert [r["record_id"] for r in report["records"]] == ["10843653", "10443995"]
+    assert "too_large" in (run_dir / REPORT_MARKDOWN_FILE).read_text()
+    assert result["email"] == {"status": "skipped", "reason": "smtp_not_configured"}
 
 
 def _search(run_dir) -> None:
@@ -666,6 +681,9 @@ async def test_workflow_creates_projects_and_merges(
     with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
         row = store._db.execute("SELECT upload_id FROM files").fetchone()
     assert row == ("up-1",)
+    report = json.loads(Path(result["report_path"]).read_text())
+    assert report["records"][0]["upload_id"] == "up-1"
+    assert report["failed_files"] == []
 
 
 @pytest.mark.asyncio
@@ -729,3 +747,53 @@ async def test_workflow_skips_galaxy_without_work(
 
     assert result["galaxy"] == {"status": "skipped", "reason": "no_work"}
     assert galaxy_config.requests == []
+
+
+# Report
+
+
+def test_write_report_after_placeholder(tmp_path):
+    # The placeholder echoes the work list as manifest, which is no manifest.
+    work_list = {"run_id": "run-1", "records": [{"record_id": "101"}]}
+    for name in (WORK_LIST_FILE, MANIFEST_FILE):
+        (tmp_path / name).write_text(json.dumps(work_list))
+    steps = {"galaxy": {"status": "ok", "placeholder": True}}
+
+    result = ActivityEnvironment().run(
+        write_report, WriteReportInput(run_dir=str(tmp_path), steps=steps)
+    )
+
+    report = json.loads(Path(result.report_path).read_text())
+    assert Path(result.report_path) == tmp_path / REPORT_FILE
+    assert [r["record_id"] for r in report["records"]] == ["101"]
+    assert report["failed_files"] == []
+    assert Path(result.markdown_path).read_text().startswith("# Zenodo harvest")
+
+
+def _email_input(tmp_path) -> EmailReportInput:
+    steps = {"galaxy": {"status": "skipped", "reason": "no_work"}}
+    written = ActivityEnvironment().run(
+        write_report, WriteReportInput(run_dir=str(tmp_path), steps=steps)
+    )
+    return EmailReportInput(
+        report_path=written.report_path,
+        markdown_path=written.markdown_path,
+        user_id="u1",
+    )
+
+
+def test_email_report_without_smtp(tmp_path, monkeypatch):
+    monkeypatch.delenv("HARVEST_SMTP_HOST", raising=False)
+
+    result = ActivityEnvironment().run(email_report, _email_input(tmp_path))
+
+    assert (result.sent, result.reason) == (False, "smtp_not_configured")
+
+
+def test_email_report_with_incomplete_smtp(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARVEST_SMTP_HOST", "127.0.0.1")
+    monkeypatch.delenv("HARVEST_SMTP_FROM", raising=False)
+
+    with pytest.raises(ApplicationError, match="HARVEST_SMTP_FROM") as error:
+        ActivityEnvironment().run(email_report, _email_input(tmp_path))
+    assert error.value.non_retryable

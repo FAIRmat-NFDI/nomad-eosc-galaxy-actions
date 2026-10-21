@@ -95,7 +95,7 @@ class MergeSummary(BaseModel):
     records_left_out: int = 0
 
 
-def _file_status(
+def file_status(
     file: ManifestFile, result: FileResult | None
 ) -> tuple[str, str | None]:
     """Status and error of a raw file that Galaxy processed or skipped."""
@@ -141,7 +141,7 @@ def merge_manifest(
                 store.record_loose_md5(cid, file.md5, file.sha256)
             if file.action == "already_known":
                 continue
-            status, error = _file_status(file, by_sha256.get(file.sha256))
+            status, error = file_status(file, by_sha256.get(file.sha256))
             store.record_file(
                 cid,
                 file.sha256,

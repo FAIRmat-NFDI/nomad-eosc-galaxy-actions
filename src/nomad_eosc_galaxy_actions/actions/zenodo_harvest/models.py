@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pydantic models for the zenodo-harvest action's workflow and activities."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -174,3 +176,30 @@ class MergeStateInput(BaseModel):
         default_factory=list,
         description="Record IDs not merged (no project), so the next run retries them.",
     )
+
+
+class WriteReportInput(BaseModel):
+    """Input for the activity that writes the run's report."""
+
+    run_dir: str
+    steps: dict[str, Any] = Field(
+        ..., description="Summaries of the galaxy, nomad and merge steps."
+    )
+
+
+class WriteReportResult(BaseModel):
+    report_path: str = Field(..., description="report.json, for programs.")
+    markdown_path: str = Field(..., description="report.md, for people.")
+
+
+class EmailReportInput(BaseModel):
+    """Input for the activity that emails the report."""
+
+    report_path: str
+    markdown_path: str
+    user_id: str = Field(..., description="Recipient: the user who started the run.")
+
+
+class EmailReportResult(BaseModel):
+    sent: bool
+    reason: str | None = Field(None, description="Why no email was sent.")
