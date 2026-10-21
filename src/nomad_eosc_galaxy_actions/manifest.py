@@ -13,13 +13,16 @@ extracted file, the results give the conversion status per raw file
 - a loose raw file's Zenodo MD5 is kept, so it is skipped before download;
 - an archive is `resolved` once extracted, or when it failed for a reason
   a new download cannot fix;
-- failed files from an older tool version are set to `retry`.
+- failed files from an older tool version are set to `retry`;
+- records whose NOMAD project could not be created are left out, so the
+  next run handles them again.
 
 Framework-agnostic: no NOMAD or Temporal imports.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel
@@ -35,6 +38,7 @@ PERMANENT_ARCHIVE_REASONS = frozenset(
 
 class ManifestArchive(BaseModel):
     concept_record_id: str
+    record_id: str
     version_doi: str | None = None
     key: str
     md5: str | None = None
@@ -88,6 +92,7 @@ class MergeSummary(BaseModel):
     archives_resolved: int = 0
     archives_unresolved: int = 0
     retried: int = 0
+    records_left_out: int = 0
 
 
 def _file_status(
@@ -102,9 +107,16 @@ def _file_status(
 
 
 def merge_manifest(
-    store: StateStore, manifest: Manifest, results: Results
+    store: StateStore,
+    manifest: Manifest,
+    results: Results,
+    upload_ids: dict[str, str] | None = None,
+    left_out: Iterable[str] = (),
 ) -> MergeSummary:
     """Write one run's outcome into the state, in a single transaction.
+
+    `upload_ids` maps record IDs to their NOMAD project's upload ID.
+    Records in `left_out` (record IDs) are not merged at all.
 
     Raises:
         ValueError: the results belong to another run.
@@ -116,10 +128,13 @@ def merge_manifest(
         )
     by_sha256 = {result.sha256: result for result in results.files}
     archive_md5 = {(a.concept_record_id, a.key): a.md5 for a in manifest.archives}
-    summary = MergeSummary()
+    upload_ids = upload_ids or {}
+    left_out = set(left_out)
+    summary = MergeSummary(records_left_out=len(left_out))
     with store.transaction():
         for file in manifest.files:
-            if file.role != "raw":  # context files are inputs, not tracked
+            # Context files are inputs, not tracked.
+            if file.role != "raw" or file.record_id in left_out:
                 continue
             cid = file.concept_record_id
             if file.source == "loose" and file.md5:
@@ -134,6 +149,7 @@ def merge_manifest(
                 path=file.path,
                 version_doi=file.version_doi,
                 tool_version=manifest.tool_version,
+                upload_id=upload_ids.get(file.record_id),
                 error=error,
                 archive_md5=(
                     archive_md5.get((cid, file.archive_key))
@@ -146,7 +162,8 @@ def merge_manifest(
             else:
                 summary.failed += 1
         for archive in manifest.archives:
-            if not archive.md5:  # cannot be recognized in a later run
+            # Without an MD5 the archive cannot be recognized in a later run.
+            if not archive.md5 or archive.record_id in left_out:
                 continue
             resolved = (
                 archive.status == "extracted"

@@ -92,7 +92,9 @@ class FakeGalaxy(ThreadingHTTPServer):
 
     The workflow behaves like the placeholder: its `manifest` output is the
     uploaded file, unless `output` is set. Add a `results` entry to
-    `invocation_outputs` to serve `results`. `job_states` lists the job state
+    `invocation_outputs` to serve `results`. `collections` maps collection IDs
+    to {element identifier: content}, served as datasets `<collection>-<identifier>`;
+    label them in `invocation_collections`. `job_states` lists the job state
     for each poll; the last one repeats.
     """
 
@@ -101,6 +103,8 @@ class FakeGalaxy(ThreadingHTTPServer):
         self.uploaded = b""
         self.output: bytes | None = None
         self.results = b""
+        self.collections: dict[str, dict[str, bytes]] = {}
+        self.invocation_collections: dict[str, dict] = {}
         self.job_states = ["ok"]
         self.invocation_outputs = {"manifest": {"id": "out-1", "src": "hda"}}
         self.requests: list[tuple[str, str]] = []
@@ -147,8 +151,25 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
             self._send(200, {"version_major": "24.2", "version_minor": "0"})
         elif path == "/api/invocations/inv-1":
             steps = [{"job_id": None}, {"job_id": "job-1"}]
-            outputs = server.invocation_outputs
-            self._send(200, {"id": "inv-1", "steps": steps, "outputs": outputs})
+            self._send(
+                200,
+                {
+                    "id": "inv-1",
+                    "steps": steps,
+                    "outputs": server.invocation_outputs,
+                    "output_collections": server.invocation_collections,
+                },
+            )
+        elif path.startswith("/api/dataset_collections/"):
+            collection_id = path.rsplit("/", 1)[1]
+            elements = [
+                {
+                    "element_identifier": name,
+                    "object": {"id": f"{collection_id}-{name}"},
+                }
+                for name in server.collections.get(collection_id, {})
+            ]
+            self._send(200, {"id": collection_id, "elements": elements})
         elif path == "/api/jobs/job-1":
             state = (
                 server.job_states.pop(0)
@@ -170,8 +191,22 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
             self._send_bytes(200, content)
         elif path == "/api/datasets/out-2/display":
             self._send_bytes(200, server.results)
+        elif path.startswith("/api/datasets/") and self._element(path):
+            if path.endswith("/display"):
+                self._send_bytes(200, self._element(path))
+            else:
+                self._send(200, {"state": "ok", "download_url": f"{path}/display"})
         else:
             self._send(404, {"err_msg": f"unknown {path}"})
+
+    def _element(self, path: str) -> bytes | None:
+        """Content of a collection element dataset `<collection>-<identifier>`."""
+        dataset_id = path.removeprefix("/api/datasets/").removesuffix("/display")
+        for collection_id, elements in self.server.collections.items():
+            for name, content in elements.items():
+                if dataset_id == f"{collection_id}-{name}":
+                    return content
+        return None
 
     def _path(self) -> str:
         path = urlparse(self.path).path.rstrip("/")
@@ -199,6 +234,81 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def fake_galaxy():
     server = FakeGalaxy()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+class FakeNomad(ThreadingHTTPServer):
+    """Local HTTP server answering NOMAD's `GET` and `POST /uploads` (API v1).
+
+    `projects` maps upload IDs to {"upload_name", "published", "content"};
+    `post_status` answers every POST with that HTTP status instead.
+    """
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), _FakeNomadHandler)
+        self.projects: dict[str, dict] = {}
+        self.post_status: int | None = None
+        self.requests: list[tuple[str, str, dict]] = []  # method, path, query
+        self.auth_headers: list[str | None] = []
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}/api/v1"
+
+
+class _FakeNomadHandler(BaseHTTPRequestHandler):
+    server: FakeNomad
+
+    def _request(self) -> dict:
+        parsed = urlparse(self.path)
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        self.server.requests.append((self.command, parsed.path, query))
+        self.server.auth_headers.append(self.headers.get("Authorization"))
+        return query
+
+    def do_GET(self):
+        query = self._request()
+        unpublished = query.get("is_published") == "false"
+        data = [
+            {"upload_id": upload_id, "upload_name": p["upload_name"]}
+            for upload_id, p in self.server.projects.items()
+            if not (unpublished and p["published"])
+        ]
+        self._send(200, {"data": data})
+
+    def do_POST(self):
+        query = self._request()
+        content = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.server.post_status:
+            self._send(self.server.post_status, {"detail": "refused"})
+            return
+        upload_id = f"up-{len(self.server.projects) + 1}"
+        self.server.projects[upload_id] = {
+            "upload_name": query.get("upload_name"),
+            "published": False,
+            "content": content,
+        }
+        self._send(200, {"upload_id": upload_id, "data": {}})
+
+    def _send(self, status, body):
+        payload = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):  # keep test output quiet
+        pass
+
+
+@pytest.fixture
+def fake_nomad():
+    server = FakeNomad()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server

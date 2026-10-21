@@ -19,11 +19,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # Version of the harvest config layout (keys and their meaning), not of the
 # values. When the layout changes: bump it and add an upgrade to UPGRADES.
-HARVEST_CONFIG_SCHEMA_VERSION = 1
+HARVEST_CONFIG_SCHEMA_VERSION = 2
 DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "data" / "harvest_config.json"
 
+
+def _add_nomad_url(content: dict[str, Any]) -> dict[str, Any]:
+    """Version 2 adds `nomad_url`; empty keeps projects in the local NOMAD."""
+    return content | {"nomad_url": ""}
+
+
 # UPGRADES[n] turns the content of a version-n file into version n + 1.
-UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    1: _add_nomad_url,
+}
 
 
 class HarvestConfigError(ValueError):
@@ -83,6 +91,12 @@ class HarvestConfig(BaseModel):
         description=(
             "ID of the harvest workflow in the acting Galaxy account. Until the "
             "real tools exist, this points to a placeholder workflow."
+        )
+    )
+    nomad_url: str = Field(
+        description=(
+            "NOMAD API URL (ending in /api/v1) where projects are created, "
+            "using the worker's NOMAD_PAT. Empty: the NOMAD that runs the Action."
         )
     )
 

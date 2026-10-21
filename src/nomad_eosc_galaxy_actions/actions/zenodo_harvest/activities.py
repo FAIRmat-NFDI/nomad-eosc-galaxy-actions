@@ -18,17 +18,29 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from nomad_eosc_galaxy_actions import galaxy_client, work_list, zenodo_client
+from nomad_eosc_galaxy_actions import (
+    galaxy_client,
+    nomad_projects,
+    work_list,
+    zenodo_client,
+)
 from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_api_key
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
     load_harvest_config,
 )
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.local_projects import (
+    LocalProjects,
+)
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
     BuildWorkListResult,
+    CreateProjectsInput,
+    CreateProjectsResult,
     FetchManifestInput,
     FetchManifestResult,
+    FetchProjectsInput,
+    FetchProjectsResult,
     MergeStateInput,
     PollGalaxyInput,
     PollGalaxyResult,
@@ -65,6 +77,7 @@ SKIPPED_FILES_SCHEMA_VERSION = 1
 STATE_FILE = Path("zenodo_harvest") / "state.sqlite"
 MANIFEST_FILE = "manifest.json"
 RESULTS_FILE = "results.json"
+PROJECTS_DIR = "projects"
 # Step index of the work list input in the harvest's Galaxy workflow.
 GALAXY_WORK_LIST_STEP = "0"
 # Zenodo allows larger pages for authenticated requests.
@@ -329,6 +342,101 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
 
 
 @activity.defn
+def fetch_projects(data: FetchProjectsInput) -> FetchProjectsResult:
+    """Download Galaxy's project zips to `run_dir/projects/<record ID>.zip`."""
+    harvest_config = _harvest_config()
+    api_key = resolve_api_key(None)
+    elements = galaxy_client.collection_elements(
+        api_key, data.collection_id, galaxy_url=harvest_config.galaxy_url
+    )
+    folder = Path(data.run_dir) / PROJECTS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    zip_paths = {}
+    for record_id, dataset_id in elements.items():
+        if not record_id.isdigit():  # also keeps the name a safe file name
+            raise ApplicationError(
+                f"Galaxy project {record_id!r} is not a Zenodo record ID",
+                non_retryable=True,
+            )
+        zip_paths[record_id] = galaxy_client.download_dataset(
+            api_key,
+            dataset_id,
+            folder / f"{record_id}.zip",
+            galaxy_url=harvest_config.galaxy_url,
+        )
+    return FetchProjectsResult(zip_paths=zip_paths)
+
+
+def _projects(harvest_config: HarvestConfig, user_id: str) -> nomad_projects.Projects:
+    """The NOMAD in `nomad_url` (with the worker's NOMAD_PAT), else the local one.
+
+    A missing PAT is an error, not a fallback: projects must never end up
+    in another NOMAD than the configured one.
+    """
+    if not harvest_config.nomad_url:
+        return LocalProjects(user_id)
+    pat = os.environ.get("NOMAD_PAT")
+    if not pat:
+        raise ApplicationError(
+            "nomad_url is set, but the worker has no NOMAD_PAT environment variable",
+            non_retryable=True,
+        )
+    return nomad_projects.RestProjects(harvest_config.nomad_url, pat)
+
+
+@activity.defn
+def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
+    """Create one private NOMAD project per record version zip.
+
+    Retry-safe: a project that already exists with the same name is reused.
+    Once the demo project limit is reached, the remaining records are left
+    out (reason `project_limit`) and handled by a later run.
+    """
+    harvest_config = _harvest_config()
+    projects = _projects(harvest_config, data.user_id)
+    content = json.loads(Path(data.work_list_path).read_text(encoding="utf-8"))
+    records = {record["record_id"]: record for record in content["records"]}
+    result = CreateProjectsResult(upload_ids={}, created=[], left_out={})
+    for record_id, zip_path in sorted(data.zip_paths.items()):
+        record = records.get(record_id)
+        if record is None:
+            raise ApplicationError(
+                f"Galaxy returned a project for record {record_id}, "
+                "which is not in the work list",
+                non_retryable=True,
+            )
+        if result.left_out:  # the limit was reached for an earlier record
+            result.left_out[record_id] = "project_limit"
+            continue
+        doi = record.get("version_doi")
+        reference = (
+            f"https://doi.org/{doi}"
+            if doi
+            else f"{harvest_config.zenodo_url.rstrip('/')}/records/{record_id}"
+        )
+        nomad_projects.add_project_metadata(zip_path, [reference])
+        name = nomad_projects.project_name(record["concept_record_id"], record_id)
+        try:
+            upload_id, created = nomad_projects.create_project(
+                projects, name, Path(zip_path)
+            )
+        except nomad_projects.ProjectLimitReached as error:
+            activity.logger.warning("%s", error)
+            result.left_out[record_id] = "project_limit"
+            continue
+        result.upload_ids[record_id] = upload_id
+        if created:
+            result.created.append(record_id)
+    activity.logger.info(
+        "NOMAD projects: %d created, %d reused, %d left out",
+        len(result.created),
+        len(result.upload_ids) - len(result.created),
+        len(result.left_out),
+    )
+    return result
+
+
+@activity.defn
 def merge_state(data: MergeStateInput) -> MergeSummary:
     """Merge Galaxy's manifest and results into the state (all or nothing)."""
     try:
@@ -339,7 +447,9 @@ def merge_state(data: MergeStateInput) -> MergeSummary:
             Path(data.results_path).read_text(encoding="utf-8")
         )
         with StateStore(_state_path()) as store:
-            summary = merge_manifest(store, manifest, results)
+            summary = merge_manifest(
+                store, manifest, results, data.upload_ids, data.left_out
+            )
     except ValueError as error:  # includes pydantic's ValidationError
         # The same files would fail again, so do not retry.
         raise ApplicationError(

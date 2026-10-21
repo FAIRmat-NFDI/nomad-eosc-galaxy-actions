@@ -39,6 +39,7 @@ def store(tmp_path):
 def _archive(md5="zip-md5", status="extracted", reason=None, key="data.zip"):
     return {
         "concept_record_id": CID,
+        "record_id": "101",
         "key": key,
         "md5": md5,
         "status": status,
@@ -61,7 +62,16 @@ def _file(sha256, *, role="raw", action="process", source="archive", **extra):
     } | extra
 
 
-def _merge(store, archives=(), files=(), results=(), tool_version="0.1"):
+def _merge(  # noqa: PLR0913
+    store,
+    *,
+    archives=(),
+    files=(),
+    results=(),
+    tool_version="0.1",
+    upload_ids=None,
+    left_out=(),
+):
     manifest = Manifest(
         schema_version=1,
         run_id=RUN,
@@ -74,7 +84,7 @@ def _merge(store, archives=(), files=(), results=(), tool_version="0.1"):
         run_id=RUN,
         files=[{"sha256": s, "status": st, "error": e} for s, st, e in results],
     )
-    return merge_manifest(store, manifest, results)
+    return merge_manifest(store, manifest, results, upload_ids, left_out)
 
 
 def _next_download(store, *files: tuple[str, str]) -> list[str]:
@@ -210,6 +220,40 @@ def test_results_of_another_run_are_refused(store):
 
     with pytest.raises(ValueError, match="does not match"):
         merge_manifest(store, manifest, results)
+
+
+def test_upload_id_is_stored_per_record(store):
+    _merge(
+        store,
+        files=[_file("sha-a"), _file("sha-b", record_id="102")],
+        results=[("sha-a", "success", None), ("sha-b", "success", None)],
+        upload_ids={"101": "upload-1"},
+    )
+
+    rows = store._db.execute("SELECT sha256, upload_id FROM files ORDER BY sha256")
+    assert rows.fetchall() == [("sha-a", "upload-1"), ("sha-b", None)]
+
+
+def test_record_without_project_is_left_out(store):
+    # No NOMAD project for record 101 (e.g. the project limit was reached).
+    summary = _merge(
+        store,
+        archives=[_archive()],
+        files=[
+            _file("sha-a"),
+            _file("sha-loose", source="loose", md5="md5-l"),
+            _file("sha-b", record_id="102"),
+        ],
+        results=[("sha-a", "success", None), ("sha-b", "success", None)],
+        left_out=["101"],
+    )
+
+    assert summary == MergeSummary(success=1, records_left_out=1)
+    assert store.known_sha256(CID) == ["sha-b"]
+    assert _next_download(store, ("data.zip", "zip-md5"), ("x.sxm", "md5-l")) == [
+        "data.zip",
+        "x.sxm",
+    ]
 
 
 def test_empty_manifest(store):

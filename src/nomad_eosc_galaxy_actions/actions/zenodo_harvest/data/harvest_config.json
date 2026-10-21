@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "zenodo_url": "https://zenodo.org",
   "zenodo_query": "(\"scanning tunneling microscopy\" OR STM) AND (Nanonis OR \".sxm\") AND resource_type.type:dataset",
   "zenodo_request_delay": 2.0,
@@ -10,5 +10,6 @@
   "max_archive_bytes": 2000000000,
   "max_uncompressed_bytes": 10000000000,
   "galaxy_url": "https://usegalaxy.eu",
-  "galaxy_workflow_id": ""
+  "galaxy_workflow_id": "",
+  "nomad_url": ""
 }

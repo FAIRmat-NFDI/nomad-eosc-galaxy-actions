@@ -131,8 +131,46 @@ class FetchManifestResult(BaseModel):
     )
 
 
+class FetchProjectsInput(BaseModel):
+    """Input for the activity that downloads the project zips from Galaxy."""
+
+    run_dir: str
+    collection_id: str = Field(
+        ..., description="Galaxy collection: one zip per Zenodo record version."
+    )
+
+
+class FetchProjectsResult(BaseModel):
+    zip_paths: dict[str, str] = Field(..., description="Record ID → local zip.")
+
+
+class CreateProjectsInput(BaseModel):
+    """Input for the activity that creates one NOMAD project per zip."""
+
+    work_list_path: str
+    user_id: str = Field(
+        ..., description="Owner of the projects when no nomad_url is configured."
+    )
+    zip_paths: dict[str, str] = Field(..., description="Record ID → local zip.")
+
+
+class CreateProjectsResult(BaseModel):
+    upload_ids: dict[str, str] = Field(..., description="Record ID → upload ID.")
+    created: list[str] = Field(..., description="Records with a new project.")
+    left_out: dict[str, str] = Field(
+        ..., description="Record ID → reason, for records without a project."
+    )
+
+
 class MergeStateInput(BaseModel):
     """Input for the activity that merges Galaxy's outputs into the state."""
 
     manifest_path: str
     results_path: str
+    upload_ids: dict[str, str] = Field(
+        default_factory=dict, description="Record ID → NOMAD upload ID."
+    )
+    left_out: list[str] = Field(
+        default_factory=list,
+        description="Record IDs not merged (no project), so the next run retries them.",
+    )

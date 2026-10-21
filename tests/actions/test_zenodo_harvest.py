@@ -3,8 +3,10 @@
 # This file is part of nomad-eosc-galaxy-actions.
 #
 # SPDX-License-Identifier: Apache-2.0
+import io
 import json
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     CANDIDATES_FILE,
     CANDIDATES_SCHEMA_VERSION,
     MANIFEST_FILE,
+    PROJECTS_DIR,
     RESULTS_FILE,
     RUN_CONFIG_FILE,
     RUN_CONFIG_SCHEMA_VERSION,
@@ -28,7 +31,9 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     WORK_LIST_FILE,
     ZENODO_HARVEST_ACTION,
     build_work_list,
+    create_projects,
     fetch_manifest,
+    fetch_projects,
     merge_state,
     poll_galaxy,
     prepare_run,
@@ -43,7 +48,9 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
+    CreateProjectsInput,
     FetchManifestInput,
+    FetchProjectsInput,
     MergeStateInput,
     PollGalaxyInput,
     PrepareRunInput,
@@ -160,6 +167,16 @@ def galaxy_config(harvest_config_file, fake_galaxy, monkeypatch):
     return fake_galaxy
 
 
+@pytest.fixture
+def nomad_config(harvest_config_file, galaxy_config, fake_nomad, monkeypatch):
+    """Extend the harvest config so projects are created in the local fake NOMAD."""
+    content = json.loads(harvest_config_file.read_text())
+    content |= {"nomad_url": fake_nomad.url}
+    harvest_config_file.write_text(json.dumps(content))
+    monkeypatch.setenv("NOMAD_PAT", "test-pat")
+    return fake_nomad
+
+
 ALL_ACTIVITIES = [
     prepare_run,
     search_zenodo,
@@ -167,6 +184,8 @@ ALL_ACTIVITIES = [
     run_galaxy,
     poll_galaxy,
     fetch_manifest,
+    fetch_projects,
+    create_projects,
     merge_state,
 ]
 
@@ -231,7 +250,14 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     assert json.loads((run_dir / WORK_LIST_FILE).read_text())["run_id"] == workflow_id
     # The shipped config has no Galaxy workflow ID.
     assert result["galaxy"] == {"status": "skipped", "reason": "galaxy_not_configured"}
-    assert result["merge"] == {"status": "skipped", "reason": "no_galaxy_run"}
+    assert (
+        result["nomad"]
+        == result["merge"]
+        == {
+            "status": "skipped",
+            "reason": "no_galaxy_run",
+        }
+    )
 
 
 def _search(run_dir) -> None:
@@ -379,6 +405,10 @@ def test_fetch_manifest_rejects_other_run(tmp_path, galaxy_config):
     assert ("GET", "/api/datasets/out-2/display") not in galaxy_config.requests
 
 
+# First record of the recorded Zenodo search (on every work list).
+CID, RECORD = "10843652", "10843653"
+
+
 def _galaxy_outputs(run_id: str) -> tuple[bytes, bytes]:
     """A manifest with one converted raw file, and its results."""
     manifest = {
@@ -387,7 +417,8 @@ def _galaxy_outputs(run_id: str) -> tuple[bytes, bytes]:
         "tool_version": "0.1",
         "archives": [
             {
-                "concept_record_id": "c1",
+                "concept_record_id": CID,
+                "record_id": RECORD,
                 "key": "d.zip",
                 "md5": "zip-md5",
                 "status": "extracted",
@@ -395,8 +426,8 @@ def _galaxy_outputs(run_id: str) -> tuple[bytes, bytes]:
         ],
         "files": [
             {
-                "concept_record_id": "c1",
-                "record_id": "r1",
+                "concept_record_id": CID,
+                "record_id": RECORD,
                 "source": "archive",
                 "archive_key": "d.zip",
                 "path": "d/a.sxm",
@@ -413,6 +444,119 @@ def _galaxy_outputs(run_id: str) -> tuple[bytes, bytes]:
         "files": [{"sha256": "sha-a", "status": "success"}],
     }
     return json.dumps(manifest).encode(), json.dumps(results).encode()
+
+
+def _project_zip() -> bytes:
+    """A project zip as Galaxy builds it: one folder per raw file."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a/a.nxs", b"nexus")
+        archive.writestr("a/a.sxm", b"raw")
+        archive.writestr("a/eln_data.yaml", b"eln")
+    return buffer.getvalue()
+
+
+def test_fetch_projects_activity(tmp_path, galaxy_config):
+    galaxy_config.collections = {"coll-1": {"101": b"zip-1", "102": b"zip-2"}}
+
+    result = ActivityEnvironment().run(
+        fetch_projects,
+        FetchProjectsInput(run_dir=str(tmp_path), collection_id="coll-1"),
+    )
+
+    folder = tmp_path / PROJECTS_DIR
+    assert result.zip_paths == {
+        "101": str(folder / "101.zip"),
+        "102": str(folder / "102.zip"),
+    }
+    assert (folder / "102.zip").read_bytes() == b"zip-2"
+
+
+def test_fetch_projects_rejects_bad_identifier(tmp_path, galaxy_config):
+    galaxy_config.collections = {"coll-1": {"../101": b"zip"}}
+
+    with pytest.raises(ApplicationError, match="not a Zenodo record ID") as error:
+        ActivityEnvironment().run(
+            fetch_projects,
+            FetchProjectsInput(run_dir=str(tmp_path), collection_id="coll-1"),
+        )
+    assert error.value.non_retryable
+
+
+def _project_inputs(tmp_path, *record_ids: str) -> CreateProjectsInput:
+    """A work list with these records (101 without DOI) and a zip for each."""
+    records = [
+        {
+            "record_id": record_id,
+            "concept_record_id": "100",
+            "version_doi": None
+            if record_id == "101"
+            else f"10.5281/zenodo.{record_id}",
+        }
+        for record_id in record_ids
+    ]
+    work_list = tmp_path / WORK_LIST_FILE
+    work_list.write_text(json.dumps({"run_id": "run-1", "records": records}))
+    zip_paths = {}
+    for record_id in record_ids:
+        path = tmp_path / f"{record_id}.zip"
+        path.write_bytes(_project_zip())
+        zip_paths[record_id] = str(path)
+    return CreateProjectsInput(
+        work_list_path=str(work_list), user_id="u1", zip_paths=zip_paths
+    )
+
+
+def test_create_projects_activity(tmp_path, nomad_config, fake_zenodo):
+    nomad_config.projects = {  # left from an earlier, interrupted attempt
+        "old": {"upload_name": "zgn-demo-100-102", "published": False}
+    }
+
+    result = ActivityEnvironment().run(
+        create_projects, _project_inputs(tmp_path, "101", "102")
+    )
+
+    assert result.upload_ids == {"101": "up-2", "102": "old"}
+    assert (result.created, result.left_out) == (["101"], {})
+    with zipfile.ZipFile(io.BytesIO(nomad_config.projects["up-2"]["content"])) as z:
+        metadata = json.loads(z.read("nomad.json"))
+    # No DOI: the record page on the configured Zenodo (the fake server here).
+    assert metadata["references"] == [f"{fake_zenodo.url}/records/101"]
+    assert set(nomad_config.auth_headers) == {"Bearer test-pat"}
+
+
+def test_create_projects_leaves_out_records_over_the_limit(tmp_path, nomad_config):
+    nomad_config.projects = {
+        f"u{i}": {"upload_name": f"zgn-demo-1-{i}", "published": False}
+        for i in range(9)
+    }
+
+    result = ActivityEnvironment().run(
+        create_projects, _project_inputs(tmp_path, "101", "102", "103")
+    )
+
+    assert result.created == ["101"]  # the 10th demo project
+    assert result.left_out == {"102": "project_limit", "103": "project_limit"}
+    posts = [r for r in nomad_config.requests if r[0] == "POST"]
+    assert len(posts) == 1
+
+
+def test_create_projects_needs_pat(tmp_path, nomad_config, monkeypatch):
+    monkeypatch.delenv("NOMAD_PAT")
+
+    with pytest.raises(ApplicationError, match="NOMAD_PAT") as error:
+        ActivityEnvironment().run(create_projects, _project_inputs(tmp_path, "101"))
+    assert error.value.non_retryable
+    assert nomad_config.requests == []
+
+
+def test_create_projects_rejects_unknown_record(tmp_path, nomad_config):
+    data = _project_inputs(tmp_path, "101")
+    data.zip_paths["999"] = data.zip_paths["101"]
+
+    with pytest.raises(ApplicationError, match="not in the work list") as error:
+        ActivityEnvironment().run(create_projects, data)
+    assert error.value.non_retryable
 
 
 def test_merge_state_activity(tmp_path, actions_fs):
@@ -432,8 +576,8 @@ def test_merge_state_activity(tmp_path, actions_fs):
 
     assert (summary.success, summary.archives_resolved) == (1, 1)
     with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
-        assert store.known_sha256("c1") == ["sha-a"]
-        assert store.is_archive_resolved("c1", "zip-md5")
+        assert store.known_sha256(CID) == ["sha-a"]
+        assert store.is_archive_resolved(CID, "zip-md5")
 
 
 @pytest.mark.parametrize(
@@ -473,25 +617,36 @@ async def test_workflow_galaxy_round_trip(actions_fs, galaxy_config):
     assert manifest == json.loads((run_dir / WORK_LIST_FILE).read_text())
     polls = [r for r in galaxy_config.requests if r[1] == "/api/jobs/job-1"]
     assert len(polls) == 3  # noqa: PLR2004
+    assert result["nomad"] == {"status": "skipped", "reason": "placeholder"}
     assert result["merge"] == {"status": "skipped", "reason": "placeholder"}
 
 
 def _real_galaxy(galaxy, workflow_id: str) -> None:
-    """Make the fake Galaxy return a real manifest and results for this run."""
+    """Make the fake Galaxy return real outputs for this run."""
     galaxy.output, galaxy.results = _galaxy_outputs(workflow_id)
     galaxy.invocation_outputs |= {"results": {"id": "out-2", "src": "hda"}}
+    galaxy.collections = {"coll-1": {RECORD: _project_zip()}}
+    galaxy.invocation_collections = {"projects": {"id": "coll-1", "src": "hdca"}}
 
 
 @pytest.mark.asyncio
-async def test_workflow_merges_galaxy_outputs(actions_fs, galaxy_config):
+async def test_workflow_creates_projects_and_merges(
+    actions_fs, nomad_config, fake_galaxy
+):
     from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(galaxy_config, workflow_id)
+    _real_galaxy(fake_galaxy, workflow_id)
 
     result = await _run_workflow(workflow_id, dry_run=False)
 
     assert result["galaxy"]["placeholder"] is False
+    assert result["nomad"] == {
+        "status": "ok",
+        "upload_ids": {RECORD: "up-1"},
+        "created": [RECORD],
+        "left_out": {},
+    }
     assert result["merge"] == {
         "status": "ok",
         "success": 1,
@@ -499,33 +654,50 @@ async def test_workflow_merges_galaxy_outputs(actions_fs, galaxy_config):
         "archives_resolved": 1,
         "archives_unresolved": 0,
         "retried": 0,
+        "records_left_out": 0,
     }
+    project = nomad_config.projects["up-1"]
+    assert project["upload_name"] == f"zgn-demo-{CID}-{RECORD}"
+    with zipfile.ZipFile(io.BytesIO(project["content"])) as archive:
+        assert "a/a.nxs" in archive.namelist()
+        assert json.loads(archive.read("nomad.json"))["references"] == [
+            "https://doi.org/10.5061/dryad.1g1jwsv49"
+        ]
     with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
-        assert store.known_sha256("c1") == ["sha-a"]
+        row = store._db.execute("SELECT upload_id FROM files").fetchone()
+    assert row == ("up-1",)
 
 
 @pytest.mark.asyncio
-async def test_workflow_dry_run_leaves_state_unchanged(actions_fs, galaxy_config):
+async def test_workflow_dry_run_changes_nothing(actions_fs, nomad_config, fake_galaxy):
     from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(galaxy_config, workflow_id)
+    _real_galaxy(fake_galaxy, workflow_id)
 
     result = await _run_workflow(workflow_id, dry_run=True)
 
+    assert result["nomad"] == {"status": "skipped", "reason": "dry_run"}
     assert result["merge"] == {"status": "skipped", "reason": "dry_run"}
+    assert nomad_config.requests == []
     with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
-        assert store.known_sha256("c1") == []
+        assert store.known_sha256(CID) == []
 
 
 @pytest.mark.asyncio
-async def test_workflow_fails_without_results_output(actions_fs, galaxy_config):
+@pytest.mark.parametrize("missing", ["results", "projects"])
+async def test_workflow_fails_without_output(
+    actions_fs, nomad_config, fake_galaxy, missing
+):
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    galaxy_config.output = _galaxy_outputs(workflow_id)[0]  # no 'results' output
+    _real_galaxy(fake_galaxy, workflow_id)
+    fake_galaxy.invocation_outputs.pop(missing, None)
+    fake_galaxy.invocation_collections.pop(missing, None)
 
     with pytest.raises(WorkflowFailureError) as error:
         await _run_workflow(workflow_id, dry_run=False)
-    assert "no output named 'results'" in str(error.value.cause)
+    assert f"no output named {missing!r}" in str(error.value.cause)
+    assert nomad_config.requests == []  # nothing written to NOMAD
 
 
 @pytest.mark.asyncio

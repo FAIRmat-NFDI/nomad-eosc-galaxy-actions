@@ -14,7 +14,9 @@ from temporalio.exceptions import ApplicationError
 with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
         build_work_list,
+        create_projects,
         fetch_manifest,
+        fetch_projects,
         merge_state,
         poll_galaxy,
         prepare_run,
@@ -24,8 +26,11 @@ with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
         BuildWorkListInput,
         BuildWorkListResult,
+        CreateProjectsInput,
+        CreateProjectsResult,
         FetchManifestInput,
         FetchManifestResult,
+        FetchProjectsInput,
         MergeStateInput,
         PollGalaxyInput,
         PrepareRunInput,
@@ -40,6 +45,7 @@ GALAXY_MAX_POLLS = 24 * 60
 # Names of the Galaxy workflow outputs; the .ga file must use these labels.
 GALAXY_MANIFEST_OUTPUT = "manifest"
 GALAXY_RESULTS_OUTPUT = "results"
+GALAXY_PROJECTS_OUTPUT = "projects"
 
 
 @workflow.defn
@@ -82,10 +88,17 @@ class ZenodoHarvestWorkflow:
             retry_policy=retry_policy,
         )
 
-        galaxy, fetched = await self._run_galaxy(
+        galaxy, fetched, collection_id = await self._run_galaxy(
             prepared.run_dir, planned, action_instance_id, retry_policy
         )
-        merge = await self._merge_state(fetched, data.dry_run, retry_policy)
+        skip = _skip_reason(fetched, data.dry_run)
+        if skip:
+            nomad = merge = {"status": "skipped", "reason": skip}
+        else:
+            nomad, projects = await self._create_projects(
+                prepared.run_dir, planned, data.user_id, collection_id, retry_policy
+            )
+            merge = await self._merge_state(fetched, projects, retry_policy)
 
         return {
             "run_dir": prepared.run_dir,
@@ -96,6 +109,7 @@ class ZenodoHarvestWorkflow:
             "work_list_files": planned.files,
             "skipped_files": planned.skipped,
             "galaxy": galaxy,
+            "nomad": nomad,
             "merge": merge,
         }
 
@@ -105,12 +119,17 @@ class ZenodoHarvestWorkflow:
         planned: BuildWorkListResult,
         run_id: str,
         retry_policy: RetryPolicy,
-    ) -> tuple[dict, FetchManifestResult | None]:
-        """Send the work list to Galaxy, wait for it and fetch its outputs."""
+    ) -> tuple[dict, FetchManifestResult | None, str | None]:
+        """Send the work list to Galaxy, wait for it and fetch the manifest.
+
+        Returns the step's summary, the fetched files and the ID of the
+        `projects` collection.
+        """
         if planned.records == 0:
-            return {"status": "skipped", "reason": "no_work"}, None
+            return {"status": "skipped", "reason": "no_work"}, None, None
         if not planned.galaxy_configured:
-            return {"status": "skipped", "reason": "galaxy_not_configured"}, None
+            skipped = {"status": "skipped", "reason": "galaxy_not_configured"}
+            return skipped, None, None
 
         started = await workflow.execute_activity(
             run_galaxy,
@@ -153,42 +172,84 @@ class ZenodoHarvestWorkflow:
             start_to_close_timeout=timedelta(minutes=30),
             retry_policy=retry_policy,
         )
+        if not fetched.placeholder:
+            # Checked before anything is written to NOMAD or the state.
+            for name in (GALAXY_RESULTS_OUTPUT, GALAXY_PROJECTS_OUTPUT):
+                if name not in polled.outputs:
+                    raise ApplicationError(
+                        f"Galaxy workflow has no output named {name!r}"
+                    )
         galaxy = {
             "status": "ok",
             "history_id": started.history_id,
             "manifest_path": fetched.manifest_path,
             "placeholder": fetched.placeholder,
         }
-        return galaxy, fetched
+        return galaxy, fetched, polled.outputs.get(GALAXY_PROJECTS_OUTPUT)
+
+    async def _create_projects(
+        self,
+        run_dir: str,
+        planned: BuildWorkListResult,
+        user_id: str,
+        collection_id: str,
+        retry_policy: RetryPolicy,
+    ) -> tuple[dict, CreateProjectsResult]:
+        """Download Galaxy's project zips and create one NOMAD project each."""
+        downloaded = await workflow.execute_activity(
+            fetch_projects,
+            FetchProjectsInput(run_dir=run_dir, collection_id=collection_id),
+            start_to_close_timeout=timedelta(hours=2),
+            retry_policy=retry_policy,
+        )
+        projects = await workflow.execute_activity(
+            create_projects,
+            CreateProjectsInput(
+                work_list_path=planned.work_list_path,
+                user_id=user_id,
+                zip_paths=downloaded.zip_paths,
+            ),
+            start_to_close_timeout=timedelta(hours=2),
+            retry_policy=retry_policy,
+        )
+        nomad = {
+            "status": "ok",
+            "upload_ids": projects.upload_ids,
+            "created": projects.created,
+            "left_out": projects.left_out,
+        }
+        return nomad, projects
 
     async def _merge_state(
         self,
-        fetched: FetchManifestResult | None,
-        dry_run: bool,
+        fetched: FetchManifestResult,
+        projects: CreateProjectsResult,
         retry_policy: RetryPolicy,
     ) -> dict:
-        """Write Galaxy's outcome into the state shared by all runs.
-
-        A dry run leaves the state unchanged, so a real run still handles
-        the same files. F6 will create the NOMAD projects before this step.
-        """
-        if fetched is None:
-            return {"status": "skipped", "reason": "no_galaxy_run"}
-        if fetched.placeholder:
-            return {"status": "skipped", "reason": "placeholder"}
-        if fetched.results_path is None:
-            raise ApplicationError(
-                f"Galaxy workflow has no output named {GALAXY_RESULTS_OUTPUT!r}"
-            )
-        if dry_run:
-            return {"status": "skipped", "reason": "dry_run"}
+        """Write Galaxy's outcome and the projects into the state of all runs."""
         merged = await workflow.execute_activity(
             merge_state,
             MergeStateInput(
                 manifest_path=fetched.manifest_path,
                 results_path=fetched.results_path,
+                upload_ids=projects.upload_ids,
+                left_out=list(projects.left_out),
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
         )
         return {"status": "ok", **merged.model_dump()}
+
+
+def _skip_reason(fetched: FetchManifestResult | None, dry_run: bool) -> str | None:
+    """Why no NOMAD projects are created and the state stays unchanged.
+
+    A dry run changes neither, so a real run still handles the same files.
+    """
+    if fetched is None:
+        return "no_galaxy_run"
+    if fetched.placeholder:
+        return "placeholder"
+    if dry_run:
+        return "dry_run"
+    return None

@@ -108,6 +108,18 @@ def test_upgrade_from_middle_version():
     assert result == {"schema_version": 3, "q": "STM", "page_size": 25}
 
 
+def test_version_1_file_gets_empty_nomad_url(tmp_path, shipped):
+    content = {k: v for k, v in shipped.items() if k != "nomad_url"}
+    content["schema_version"] = 1
+    path = tmp_path / "v1.json"
+    path.write_text(json.dumps(content))
+
+    config = load_harvest_config(path)
+
+    assert config.schema_version == HARVEST_CONFIG_SCHEMA_VERSION
+    assert config.nomad_url == ""
+
+
 def test_upgrade_missing_step():
     with pytest.raises(HarvestConfigError, match="no upgrade from schema_version 1"):
         upgrade({"schema_version": 1}, current=2, upgrades={})
