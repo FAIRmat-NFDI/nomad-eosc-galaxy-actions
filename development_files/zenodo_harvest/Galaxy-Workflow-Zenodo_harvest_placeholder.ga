@@ -1,0 +1,85 @@
+{
+    "a_galaxy_workflow": "true",
+    "annotation": "Placeholder for the Zenodo harvest: returns the work list unchanged as 'manifest'. Replaced by the download and conversion tools later.",
+    "comments": [],
+    "creator": [
+        {
+            "class": "Organization",
+            "name": "FAIRmat",
+            "url": "https://www.fairmat-nfdi.eu/fairmat/"
+        }
+    ],
+    "format-version": "0.1",
+    "license": "MIT",
+    "name": "Zenodo harvest placeholder",
+    "readme": "Placeholder workflow for the zenodo_harvest NOMAD Action (Galaxy round trip test).",
+    "steps": {
+        "0": {
+            "annotation": "work_list.json written by the zenodo_harvest Action.",
+            "content_id": null,
+            "errors": null,
+            "id": 0,
+            "input_connections": {},
+            "inputs": [],
+            "label": "work list",
+            "name": "Input dataset",
+            "outputs": [],
+            "position": {
+                "left": 0,
+                "top": 0
+            },
+            "tool_id": null,
+            "tool_state": "{\"optional\": false, \"format\": [\"json\"], \"tag\": null}",
+            "tool_version": null,
+            "type": "data_input",
+            "uuid": "29a0efaf-27f5-41a6-b304-2811a6d2e410",
+            "when": null,
+            "workflow_outputs": []
+        },
+        "1": {
+            "annotation": "Copies the work list (stands in for download, extraction and conversion).",
+            "content_id": "cat1",
+            "errors": null,
+            "id": 1,
+            "input_connections": {
+                "input1": {
+                    "id": 0,
+                    "output_name": "output"
+                }
+            },
+            "inputs": [],
+            "label": "placeholder",
+            "name": "Concatenate datasets",
+            "outputs": [
+                {
+                    "name": "out_file1",
+                    "type": "input"
+                }
+            ],
+            "position": {
+                "left": 300,
+                "top": 0
+            },
+            "post_job_actions": {},
+            "tool_id": "cat1",
+            "tool_state": "{\"input1\": {\"__class__\": \"ConnectedValue\"}, \"queries\": [], \"__page__\": null, \"__rerun_remap_job_id__\": null}",
+            "tool_version": "1.0.0",
+            "type": "tool",
+            "uuid": "26527007-7303-4346-b977-af27969446d8",
+            "when": null,
+            "workflow_outputs": [
+                {
+                    "label": "manifest",
+                    "output_name": "out_file1",
+                    "uuid": "1c2ad309-bd20-4293-999c-587d64ba3f35"
+                }
+            ]
+        }
+    },
+    "tags": [
+        "zenodo",
+        "placeholder"
+    ],
+    "uuid": "7714b0a1-6fd5-4c3e-8718-6b6d3d15163e",
+    "version": 1
+}

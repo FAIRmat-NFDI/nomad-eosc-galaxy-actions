@@ -17,6 +17,56 @@ To do it with your own data instead:
 
 Once `COMPLETED`, a new entry appears in the same upload: the original spectrum's data, plus an `NXfit` group holding one `NXpeak` per detected peak (`data/position` in the spectrum's own energy units, `data/intensity` in its own intensity units).
 
+## Harvest SPM datasets from Zenodo
+
+The **ZenodoHarvestAction** finds openly licensed SPM (scanning probe microscopy, e.g. STM, STS and AFM)
+datasets on Zenodo, converts their raw files to NeXus on Galaxy and stores each Zenodo record version as a
+private NOMAD project. It remembers what it has processed, so the next run only handles new files.
+
+The shipped harvest config starts with Nanonis `.sxm` files. For more SPM techniques and file formats,
+widen `zenodo_query` and `raw_extensions` in the harvest config.
+
+Start it from **Actions** in the main menu. No project needs to be selected.
+
+### Form fields
+
+| Field | Meaning |
+|---|---|
+| `dry_run` | Default on. Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. |
+| `max_records` | Process at most this many Zenodo records with new work. Empty means no limit. |
+| `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
+| `max_runs` | With `repeat_every_days`: stop after this many runs. Empty means until the Action is stopped. |
+
+### Repeated runs
+
+- All runs of a series belong to one Action, which shows as `RUNNING` until the series ends.
+- Each run has its own folder (`run-001`, `run-002`, ...) in the Action's artifacts.
+- **Stop** ends the series, also while it waits for the next run.
+
+### Failed runs
+
+A failed run fails the Action and **ends the series**. Its report is still written and emailed, with the
+failed step and the error; the email subject ends in "run failed". Fix the cause and start the Action again.
+Already processed files are not handled twice.
+
+### Report
+
+Each run writes `report.json` and `report.md` into its run folder: the Zenodo search, the work list,
+Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed file with its reason.
+
+### Worker settings
+
+Settings that stay with the installation are in the harvest config file
+(`actions/zenodo_harvest/data/harvest_config.json`, or the file in the entry point's
+`harvest_config_path`). Secrets are only read from the worker's environment:
+
+| Variable | Needed for |
+|---|---|
+| `GALAXY_API_KEY` | running the Galaxy workflow |
+| `NOMAD_PAT` | creating projects through the REST API (only when `nomad_url` is set in the harvest config) |
+| `ZENODO_TOKEN` | optional: larger Zenodo result pages |
+| `HARVEST_SMTP_HOST`, `HARVEST_SMTP_PORT`, `HARVEST_SMTP_FROM`, `HARVEST_SMTP_USER`, `HARVEST_SMTP_PASSWORD` | emailing the report; without a host no email is sent |
+
 ## Troubleshooting
 
 - **Nothing happens after running the action**: check that a CPU action worker is running (in nomad-distro-dev, `uv run poe cpuworker`) and Temporal is up (`docker compose up -d`).

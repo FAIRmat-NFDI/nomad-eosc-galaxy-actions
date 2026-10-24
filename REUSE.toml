@@ -8,9 +8,11 @@ exclude = [
 # Binary/data files that can't practically carry an inline header.
 [[annotations]]
 path = [
+  "development_files/**/*.ga",
   "docs/assets/*.png",
   "examples/galaxy_demo/example_data/*.nxs",
   "src/nomad_eosc_galaxy_actions/actions/find_peaks/data/*.ga",
+  "src/nomad_eosc_galaxy_actions/actions/zenodo_harvest/data/*.json",
   "src/nomad_eosc_galaxy_actions/example_uploads/find_peaks/*.nxs",
 ]
 SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
@@ -25,6 +27,13 @@ path = [
 ]
 SPDX-FileCopyrightText = "The nomad-eosc-galaxy-actions Authors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Recorded Zenodo search responses; Zenodo publishes record metadata under
+# CC0 (https://about.zenodo.org/terms/).
+[[annotations]]
+path = ["tests/data/zenodo/*.json"]
+SPDX-FileCopyrightText = "Zenodo record metadata (https://zenodo.org)"
+SPDX-License-Identifier = "CC0-1.0"
 
 # Non-code project files (docs, CI, tooling config) that can't practically
 # carry an inline header.
