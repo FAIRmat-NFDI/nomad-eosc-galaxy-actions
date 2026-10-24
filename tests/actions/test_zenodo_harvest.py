@@ -8,6 +8,7 @@ import json
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
 def _prepare_input(**overrides) -> PrepareRunInput:
     values = {
         "action_instance_id": "run-1",
+        "run_id": "run-1",
         "started_at": "2026-10-15T12:00:00+00:00",
         "dry_run": True,
         "max_records": None,
@@ -108,14 +110,22 @@ def test_write_run_config_overwrites_previous_run(tmp_path):
     assert json.loads(path.read_text())["dry_run"] is False
 
 
-@pytest.mark.parametrize("max_records", [0, -1])
-def test_workflow_input_rejects_non_positive_max_records(max_records):
+@pytest.mark.parametrize("field", ["max_records", "repeat_every_days", "max_runs"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_workflow_input_rejects_non_positive_numbers(field, value):
     with pytest.raises(ValidationError):
-        ZenodoHarvestWorkflowInput(user_id="u1", max_records=max_records)
+        ZenodoHarvestWorkflowInput(user_id="u1", **{field: value})
 
 
 def test_workflow_input_defaults_to_dry_run():
     assert ZenodoHarvestWorkflowInput(user_id="u1").dry_run is True
+
+
+def test_run_number_is_not_in_the_form():
+    schema = ZenodoHarvestWorkflowInput.model_json_schema()
+
+    assert "run_number" not in schema["properties"]
+    assert {"repeat_every_days", "max_runs"} <= schema["properties"].keys()
 
 
 def test_write_candidates(tmp_path):
@@ -201,7 +211,7 @@ ALL_ACTIVITIES = [
 
 
 async def _run_workflow(
-    workflow_id: str, max_records: int | None = 2, dry_run: bool = True
+    workflow_id: str, max_records: int | None = 2, dry_run: bool = True, **inputs
 ) -> dict:
     # Time-skipping test server: a local Temporal test server (downloaded on
     # first use) that fast-forwards timers such as the Galaxy polling sleep.
@@ -217,7 +227,7 @@ async def _run_workflow(
             return await env.client.execute_workflow(
                 ZenodoHarvestWorkflow.run,
                 ZenodoHarvestWorkflowInput(
-                    user_id="u1", max_records=max_records, dry_run=dry_run
+                    user_id="u1", max_records=max_records, dry_run=dry_run, **inputs
                 ),
                 id=workflow_id,
                 task_queue=task_queue,
@@ -247,7 +257,7 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
 
     run_dir = Path(result["run_dir"])
     run_config = json.loads((run_dir / RUN_CONFIG_FILE).read_text())
-    assert run_config["action_instance_id"] == workflow_id
+    assert run_config["action_instance_id"] == run_config["run_id"] == workflow_id
     assert run_config["max_records"] == max_records
     used = HarvestConfig.model_validate(run_config["harvest_config"])
     assert used.zenodo_url == json.loads(harvest_config_file.read_text())["zenodo_url"]
@@ -716,6 +726,8 @@ async def test_workflow_fails_without_output(
         await _run_workflow(workflow_id, dry_run=False)
     assert f"no output named {missing!r}" in str(error.value.cause)
     assert nomad_config.requests == []  # nothing written to NOMAD
+    [report_path] = actions_fs.rglob(REPORT_FILE)
+    assert json.loads(report_path.read_text())["failure"]["step"] == "galaxy"
 
 
 @pytest.mark.asyncio
@@ -726,6 +738,15 @@ async def test_workflow_fails_when_galaxy_fails(actions_fs, galaxy_config):
         await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}")
     assert "ended in state 'error'" in str(error.value.cause)
     assert ("GET", "/api/datasets/out-1/display") not in galaxy_config.requests
+    # The failed run still writes its report.
+    [report_path] = actions_fs.rglob(REPORT_FILE)
+    failure = json.loads(report_path.read_text())["failure"]
+    assert failure["step"] == "galaxy"
+    assert "ended in state 'error'" in failure["error"]
+    assert (
+        "**Run failed** in step `galaxy`"
+        in (report_path.parent / REPORT_MARKDOWN_FILE).read_text()
+    )
 
 
 @pytest.mark.asyncio
@@ -747,6 +768,73 @@ async def test_workflow_skips_galaxy_without_work(
 
     assert result["galaxy"] == {"status": "skipped", "reason": "no_work"}
     assert galaxy_config.requests == []
+
+
+# Repeated runs
+
+
+@pytest.mark.asyncio
+async def test_workflow_repeats_weekly(actions_fs, harvest_config_file, fake_zenodo):
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+
+    result = await _run_workflow(workflow_id, repeat_every_days=7, max_runs=2)
+
+    assert result["run_number"] == 2  # noqa: PLR2004
+    assert result["run_id"] == f"{workflow_id}-run-002"
+    instance_dir = Path(result["run_dir"]).parent  # the Action instance's folder
+    assert str(instance_dir).startswith(str(actions_fs / workflow_id))
+    first, second = (
+        json.loads((instance_dir / f"run-00{n}" / RUN_CONFIG_FILE).read_text())
+        for n in (1, 2)
+    )
+    assert first["run_id"] == f"{workflow_id}-run-001"
+    # Start to start, so the weekday stays the same; the test server skips the wait.
+    gap = datetime.fromisoformat(second["started_at"]) - datetime.fromisoformat(
+        first["started_at"]
+    )
+    assert timedelta(days=7) <= gap < timedelta(days=7, minutes=1)
+    # Each run searches Zenodo and writes its own report.
+    assert len(fake_zenodo.requests) == 2 * len(fake_zenodo.pages)
+    assert (instance_dir / "run-001" / REPORT_FILE).is_file()
+    assert Path(result["report_path"]).parent == instance_dir / "run-002"
+
+
+@pytest.mark.asyncio
+async def test_failed_run_ends_the_repeated_runs(actions_fs, galaxy_config):
+    galaxy_config.job_states = ["error"]
+
+    with pytest.raises(WorkflowFailureError):
+        await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", repeat_every_days=7)
+
+    [report_path] = actions_fs.rglob(REPORT_FILE)  # no second run
+    assert report_path.parent.name == "run-001"
+    assert json.loads(report_path.read_text())["failure"]["step"] == "galaxy"
+
+
+@pytest.mark.asyncio
+async def test_stopping_ends_the_repeated_runs(actions_fs, harvest_config_file):
+    task_queue = f"test-{uuid.uuid4()}"
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[ZenodoHarvestWorkflow],
+            activities=ALL_ACTIVITIES,
+            activity_executor=ThreadPoolExecutor(max_workers=2),
+        ):
+            handle = await env.client.start_workflow(
+                ZenodoHarvestWorkflow.run,
+                ZenodoHarvestWorkflowInput(user_id="u1", repeat_every_days=7),
+                id=f"zenodo-harvest-{uuid.uuid4()}",
+                task_queue=task_queue,
+            )
+            await handle.cancel()  # what NOMAD's Stop button does
+
+            with pytest.raises(WorkflowFailureError):
+                await handle.result()
+    # Stopping is no failure, so no failure report is written.
+    for report_path in actions_fs.rglob(REPORT_FILE):
+        assert json.loads(report_path.read_text())["failure"] is None
 
 
 # Report

@@ -7,11 +7,13 @@ from nomad_eosc_galaxy_actions.manifest import Manifest, Results
 from nomad_eosc_galaxy_actions.report import (
     REPORT_SCHEMA_VERSION,
     build_report,
+    email_subject,
     render_markdown,
 )
 
 RUN_CONFIG = {
     "action_instance_id": "run-1",
+    "run_id": "run-1",
     "started_at": "2026-10-21T08:00:00+00:00",
     "dry_run": False,
 }
@@ -171,3 +173,40 @@ def test_markdown_of_a_dry_run_without_work():
     assert "| State | not run |" in text
     # Records, skipped files and failed files are empty.
     assert text.count("None.") == 3  # noqa: PLR2004
+
+
+def test_failed_run():
+    error = "Galaxy invocation inv-1 ended in state 'error'"
+    failure = {"step": "galaxy", "error": error}
+    steps = {"failure": failure}
+    report = _report(manifest=None, results=None, steps=steps)
+
+    assert report["failure"] == failure
+    text = render_markdown(report)
+    assert "**Run failed** in step `galaxy`: Galaxy invocation inv-1" in text
+    assert "| Galaxy | **failed** |" in text
+    assert "| NOMAD projects | not run |" in text
+    assert "| Zenodo search | 2 candidates;" in text  # steps before it keep results
+
+
+def test_failure_in_the_first_step_hides_empty_counts():
+    report = _report(
+        candidates={},
+        work_list=None,
+        skipped_files=None,
+        manifest=None,
+        results=None,
+        steps={"failure": {"step": "zenodo_search", "error": "HTTP 503"}},
+    )
+
+    text = render_markdown(report)
+
+    assert "| Zenodo search | **failed** |" in text
+    assert "0 candidates" not in text
+
+
+def test_email_subject():
+    assert email_subject(_report()) == "Zenodo harvest report 2026-10-21"
+    failed = _report(steps={"failure": {"step": "merge", "error": "x"}})
+    assert email_subject(failed) == "Zenodo harvest report 2026-10-21: run failed"
+    assert email_subject({"started_at": None}) == "Zenodo harvest report "

@@ -7,7 +7,8 @@
 
 Built from the files in the run folder (search result, work list, skipped
 files, Galaxy's manifest and results) and the workflow's step summaries.
-Every record and file that was not handled is listed with its reason.
+Every record and file that was not handled is listed with its reason. A
+failed run is reported too, with the failed step and its error.
 
 Framework-agnostic: no NOMAD or Temporal imports.
 """
@@ -24,8 +25,8 @@ from nomad_eosc_galaxy_actions.manifest import (
     file_status,
 )
 
-# Version of the report.json layout (keys and their meaning).
-REPORT_SCHEMA_VERSION = 1
+# Version of the report.json layout (keys and their meaning); 2 adds `failure`.
+REPORT_SCHEMA_VERSION = 2
 
 
 def failed_files(manifest: Manifest, results: Results) -> list[dict[str, str]]:
@@ -56,7 +57,8 @@ def build_report(  # noqa: PLR0913
     """Collect the content of `report.json` from the run's files.
 
     `steps` holds the workflow's summary of the Galaxy, NOMAD and merge
-    steps. Files of steps that did not run are None.
+    steps, and `failure` ({step, error}) when the run failed. Files of steps
+    that did not run are None.
     """
     nomad = steps.get("nomad", {})
     upload_ids = nomad.get("upload_ids", {})
@@ -80,9 +82,10 @@ def build_report(  # noqa: PLR0913
     rejected = Counter(r["reason"] for r in candidates.get("rejected", []))
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "run_id": run_config.get("action_instance_id"),
+        "run_id": run_config.get("run_id"),
         "started_at": run_config.get("started_at"),
         "dry_run": run_config.get("dry_run"),
+        "failure": steps.get("failure"),
         "zenodo": {
             "candidates": len(candidates.get("candidates", [])),
             "rejected": dict(sorted(rejected.items())),
@@ -92,6 +95,12 @@ def build_report(  # noqa: PLR0913
         "failed_files": failed,
         "steps": steps,
     }
+
+
+def email_subject(report: dict[str, Any]) -> str:
+    """For example "Zenodo harvest report 2026-10-21: run failed"."""
+    subject = f"Zenodo harvest report {(report.get('started_at') or '')[:10]}"
+    return f"{subject}: run failed" if report.get("failure") else subject
 
 
 def _cell(value: Any) -> str:
@@ -141,20 +150,28 @@ def render_markdown(report: dict[str, Any]) -> str:
     """The report for people; also the email body."""
     steps = report["steps"]
     zenodo = report["zenodo"]
+    failure = report.get("failure")
     rejected = ", ".join(f"{n} {reason}" for reason, n in zenodo["rejected"].items())
     overview = [
         [
+            "zenodo_search",
             "Zenodo search",
             f"{zenodo['candidates']} candidates; rejected: {rejected or 'none'}",
         ],
         [
+            "work_list",
             "Work list",
             f"{len(report['records'])} records; "
             f"{len(report['skipped_files'])} files skipped",
         ],
-        ["Galaxy", _step(steps.get("galaxy"))],
-        ["NOMAD projects", _nomad_line(steps.get("nomad"))],
-        ["State", _merge_line(steps.get("merge"))],
+        ["galaxy", "Galaxy", _step(steps.get("galaxy"))],
+        ["nomad", "NOMAD projects", _nomad_line(steps.get("nomad"))],
+        ["merge", "State", _merge_line(steps.get("merge"))],
+    ]
+    # The failed step shows "failed"; the steps after it show "not run".
+    overview = [
+        [name, "**failed**" if failure and failure["step"] == step else line]
+        for step, name, line in overview
     ]
     records = [
         [r["record_id"], r["title"], r["doi"], r["upload_id"] or r["left_out"]]
@@ -167,6 +184,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         "# Zenodo harvest report\n\n"
         f"Run `{report['run_id']}`, started {report['started_at']}"
         f"{dry_run if report['dry_run'] else ''}.\n\n"
+        + (
+            f"**Run failed** in step `{failure['step']}`: {_cell(failure['error'])}\n\n"
+            if failure
+            else ""
+        )
         + _table(["Step", "Result"], overview)
         + "\n## Records\n\n"
         + _table(["Record", "Title", "DOI", "NOMAD upload ID or reason"], records)

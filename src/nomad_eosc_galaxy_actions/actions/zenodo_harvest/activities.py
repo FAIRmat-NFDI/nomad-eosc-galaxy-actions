@@ -71,7 +71,7 @@ ZENODO_HARVEST_ACTION = (
 RUN_CONFIG_FILE = "run_config.json"
 # Version of the run_config.json layout. Bump it when a key is renamed,
 # removed or changes meaning, so readers can recognize older files.
-RUN_CONFIG_SCHEMA_VERSION = 1
+RUN_CONFIG_SCHEMA_VERSION = 2
 CANDIDATES_FILE = "candidates.json"
 # Version of the candidates.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
 CANDIDATES_SCHEMA_VERSION = 1
@@ -117,7 +117,8 @@ def write_run_config(
     - `schema_version`: version of this file's layout (keys and their meaning),
       not of the data. A reader that finds an older version knows the layout
       differs and can convert it. See RUN_CONFIG_SCHEMA_VERSION.
-    - `action_instance_id`, `started_at`, `dry_run`, `max_records`: the run's inputs.
+    - `action_instance_id`, `run_id`, `started_at`, `dry_run`, `max_records`:
+      the run's inputs (`run_id` added in version 2).
     - `harvest_config`: the harvest config used by this run (already upgraded
       to the current version), so the run can be explained even after the
       config file changes.
@@ -135,6 +136,7 @@ def write_run_config(
     run_config = {
         "schema_version": RUN_CONFIG_SCHEMA_VERSION,
         "action_instance_id": data.action_instance_id,
+        "run_id": data.run_id,
         "started_at": data.started_at,
         "dry_run": data.dry_run,
         "max_records": data.max_records,
@@ -151,7 +153,9 @@ def prepare_run(data: PrepareRunInput) -> PrepareRunResult:
     from nomad.actions.manager import action_instance_artifacts_dir  # noqa: PLC0415
 
     harvest_config = _harvest_config().model_dump(mode="json")
-    run_dir = action_instance_artifacts_dir(data.action_instance_id)
+    run_dir = Path(action_instance_artifacts_dir(data.action_instance_id))
+    if data.run_folder:
+        run_dir /= data.run_folder
     path = write_run_config(run_dir, harvest_config, data)
     activity.logger.info("Prepared harvest run in %s", run_dir)
     return PrepareRunResult(run_dir=str(run_dir), run_config_path=str(path))
@@ -512,6 +516,8 @@ def _user_email(user_id: str) -> str | None:
 def email_report(data: EmailReportInput) -> EmailReportResult:
     """Email `report.md` (with `report.json` attached) to the run's user.
 
+    Also sent for a failed run; its subject then ends in "run failed".
+
     Sends nothing when the worker has no HARVEST_SMTP_HOST (see `mailer`).
     """
     try:
@@ -527,7 +533,7 @@ def email_report(data: EmailReportInput) -> EmailReportResult:
     message = mailer.build_message(
         settings.sender,
         address,
-        subject=f"Zenodo harvest report {(content['started_at'] or '')[:10]}",
+        subject=report.email_subject(content),
         body=Path(data.markdown_path).read_text(encoding="utf-8"),
         attachments=[Path(data.report_path)],
     )

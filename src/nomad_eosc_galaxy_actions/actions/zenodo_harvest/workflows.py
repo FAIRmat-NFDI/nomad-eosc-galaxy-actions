@@ -9,7 +9,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
@@ -54,17 +54,48 @@ GALAXY_PROJECTS_OUTPUT = "projects"
 
 @workflow.defn
 class ZenodoHarvestWorkflow:
+    def __init__(self) -> None:
+        self._step = ""  # the running step, named in the report of a failed run
+
     @workflow.run
     async def run(self, data: ZenodoHarvestWorkflowInput) -> dict:
+        """One harvest run, or one run of a repeated series.
+
+        A repeated series waits for the next start and then continues as new:
+        the same Action instance restarts with an empty event history, so
+        weekly runs never reach Temporal's history size limit.
+        """
+        # workflow.now(), not datetime.now(): workflow code must be
+        # deterministic, so time comes from Temporal's replayable clock.
+        started = workflow.now()
+        if not data.repeat_every_days:
+            return await self._harvest(data, workflow.info().workflow_id, None)
+
+        number = data.run_number
+        folder = f"run-{number:03d}"
+        result = await self._harvest(
+            data, f"{workflow.info().workflow_id}-{folder}", folder
+        )
+        if data.max_runs and number >= data.max_runs:
+            return result | {"run_number": number}
+        wait = started + timedelta(days=data.repeat_every_days) - workflow.now()
+        if wait > timedelta(0):  # a run longer than the interval starts at once
+            await workflow.sleep(wait)
+        # One argument only: Temporal decodes it as the input model only when
+        # the number of arguments matches run()'s parameters.
+        workflow.continue_as_new(data.model_copy(update={"run_number": number + 1}))
+
+    async def _harvest(
+        self, data: ZenodoHarvestWorkflowInput, run_id: str, run_folder: str | None
+    ) -> dict:
         retry_policy = RetryPolicy(maximum_attempts=3)
-        action_instance_id = workflow.info().workflow_id
 
         prepared = await workflow.execute_activity(
             prepare_run,
             PrepareRunInput(
-                action_instance_id=action_instance_id,
-                # workflow.now(), not datetime.now(): workflow code must be
-                # deterministic, so time comes from Temporal's replayable clock.
+                action_instance_id=workflow.info().workflow_id,
+                run_id=run_id,
+                run_folder=run_folder,
                 started_at=workflow.now().isoformat(),
                 dry_run=data.dry_run,
                 max_records=data.max_records,
@@ -72,44 +103,77 @@ class ZenodoHarvestWorkflow:
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=retry_policy,
         )
+        steps: dict = {}
+        try:
+            return await self._steps(
+                data, run_id, prepared.run_dir, steps, retry_policy
+            )
+        except (ActivityError, ApplicationError) as error:
+            if _is_stop(error):
+                raise
+            # Report the failure, then fail the run as before.
+            steps["failure"] = {"step": self._step, "error": _error_message(error)}
+            try:
+                await self._report(prepared.run_dir, steps, data.user_id, retry_policy)
+            except ActivityError as report_error:
+                workflow.logger.warning(
+                    "No report for the failed run: %s", _error_message(report_error)
+                )
+            raise
 
+    async def _steps(
+        self,
+        data: ZenodoHarvestWorkflowInput,
+        run_id: str,
+        run_dir: str,
+        steps: dict,
+        retry_policy: RetryPolicy,
+    ) -> dict:
+        """The run's steps; `steps` collects their summaries for the report."""
         # Long timeout: Zenodo may ask to wait up to a minute when rate-limited.
+        self._step = "zenodo_search"
         searched = await workflow.execute_activity(
             search_zenodo,
-            SearchZenodoInput(run_dir=prepared.run_dir),
+            SearchZenodoInput(run_dir=run_dir),
             start_to_close_timeout=timedelta(minutes=15),
             retry_policy=retry_policy,
         )
 
+        self._step = "work_list"
         planned = await workflow.execute_activity(
             build_work_list,
             BuildWorkListInput(
-                run_dir=prepared.run_dir,
-                run_id=action_instance_id,
+                run_dir=run_dir,
+                run_id=run_id,
                 max_records=data.max_records,
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
         )
 
+        self._step = "galaxy"
         galaxy, fetched, collection_id = await self._run_galaxy(
-            prepared.run_dir, planned, action_instance_id, retry_policy
+            run_dir, planned, run_id, retry_policy
         )
+        steps["galaxy"] = galaxy
         skip = _skip_reason(fetched, data.dry_run)
         if skip:
             nomad = merge = {"status": "skipped", "reason": skip}
         else:
+            self._step = "nomad"
             nomad, projects = await self._create_projects(
-                prepared.run_dir, planned, data.user_id, collection_id, retry_policy
+                run_dir, planned, data.user_id, collection_id, retry_policy
             )
+            steps["nomad"] = nomad
+            self._step = "merge"
             merge = await self._merge_state(fetched, projects, retry_policy)
+        steps |= {"nomad": nomad, "merge": merge}
 
-        steps = {"galaxy": galaxy, "nomad": nomad, "merge": merge}
-        report, email = await self._report(
-            prepared.run_dir, steps, data.user_id, retry_policy
-        )
+        self._step = "report"
+        report, email = await self._report(run_dir, steps, data.user_id, retry_policy)
         return {
-            "run_dir": prepared.run_dir,
+            "run_id": run_id,
+            "run_dir": run_dir,
             "dry_run": data.dry_run,
             "candidates": searched.candidates,
             "rejected": searched.rejected,
@@ -276,6 +340,18 @@ class ZenodoHarvestWorkflow:
         if not emailed.sent:
             return written.report_path, {"status": "skipped", "reason": emailed.reason}
         return written.report_path, {"status": "ok"}
+
+
+def _is_stop(error: ActivityError | ApplicationError) -> bool:
+    """True when an activity ended because the Action was stopped."""
+    return isinstance(error, ActivityError) and isinstance(error.cause, CancelledError)
+
+
+def _error_message(error: ActivityError | ApplicationError) -> str:
+    """The activity's own error, not Temporal's "Activity task failed"."""
+    if isinstance(error, ActivityError) and error.cause is not None:
+        return str(error.cause)
+    return str(error)
 
 
 def _skip_reason(fetched: FetchManifestResult | None, dry_run: bool) -> str | None:

@@ -8,6 +8,7 @@
 from typing import Any
 
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class ZenodoHarvestWorkflowInput(BaseModel):
@@ -22,7 +23,9 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     dry_run: bool = Field(
         True,
-        description="Search, plan and convert, but do not create NOMAD projects.",
+        description="Search, plan and convert, but create no NOMAD projects and "
+        "leave the record of processed files unchanged, so a later real run "
+        "handles the same files.",
     )
     max_records: int | None = Field(
         None,
@@ -31,12 +34,35 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "this run (useful for small test runs); already handled records do not "
         "count. Empty means no limit.",
     )
+    repeat_every_days: int | None = Field(
+        None,
+        ge=1,
+        description="Start a new run this many days after the previous one "
+        "started (7 = weekly), until the Action is stopped. Empty means one run. "
+        "A failed run stops the Action and the repeats; its report is still "
+        "emailed. Start the Action again to resume.",
+    )
+    max_runs: int | None = Field(
+        None,
+        ge=1,
+        description="With repeat_every_days: stop after this many runs. Empty "
+        "means until the Action is stopped.",
+    )
+    # Set by the workflow when it continues as new; SkipJsonSchema keeps it
+    # out of the JSON schema, so the form does not show it.
+    run_number: SkipJsonSchema[int] = 1
 
 
 class PrepareRunInput(BaseModel):
     """Input for the activity that sets up the run's artifacts folder."""
 
     action_instance_id: str
+    run_id: str = Field(
+        ..., description="Unique per run; equals action_instance_id for one run."
+    )
+    run_folder: str | None = Field(
+        None, description="Subfolder of a repeated run; empty for one run."
+    )
     started_at: str = Field(
         ..., description="ISO 8601 start time, taken from the workflow clock."
     )
