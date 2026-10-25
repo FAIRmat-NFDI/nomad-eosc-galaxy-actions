@@ -34,7 +34,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
         default=None,
         description=(
             "Path of this installation's harvest config file. Empty means the "
-            "file shipped with the Action (data/harvest_config.json)."
+            "file shipped with the Action (config/harvest_config.json)."
         ),
     )
 

@@ -12,6 +12,7 @@ is testable without a NOMAD installation or a Temporal worker.
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from nomad_eosc_galaxy_actions import (
 from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_api_key
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
+    HarvestConfigError,
     load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.local_projects import (
@@ -98,7 +100,11 @@ def _harvest_config() -> HarvestConfig:
     from nomad.config import config  # noqa: PLC0415
 
     entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
-    return load_harvest_config(entry_point.harvest_config_path)
+    try:
+        return load_harvest_config(entry_point.harvest_config_path)
+    except (FileNotFoundError, HarvestConfigError) as error:
+        # Loading again gives the same error, so do not retry.
+        raise ApplicationError(str(error), non_retryable=True) from error
 
 
 def _state_path() -> Path:
@@ -345,6 +351,18 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
     placeholder = manifest == sent  # the work list came back unchanged
     if placeholder:
         activity.logger.info("Galaxy returned the work list unchanged (placeholder)")
+    else:
+        files = manifest.get("files", [])
+        actions = Counter(file.get("action") for file in files)
+        activity.logger.info(
+            "Galaxy manifest for run %s: %d files (%s), tool_version %s; results: %s",
+            sent["run_id"],
+            len(files),
+            ", ".join(f"{n} {action}" for action, n in sorted(actions.items()))
+            or "none",
+            manifest.get("tool_version"),
+            "yes" if data.results_dataset_id else "no",
+        )
     results_path = None
     if data.results_dataset_id:
         results_path = str(download(data.results_dataset_id, RESULTS_FILE))

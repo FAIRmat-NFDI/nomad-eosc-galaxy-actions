@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Harvest configuration: what to harvest and where to convert it.
 
-The settings ship with the Action in `data/harvest_config.json`. A NOMAD
+The settings ship with the Action in `config/harvest_config.json`. A NOMAD
 installation can use its own file instead (entry point `harvest_config_path`).
 Every file carries a `schema_version`, and older versions are upgraded on load.
 """
@@ -13,19 +13,29 @@ Every file carries a `schema_version`, and older versions are upgraded on load.
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # Version of the harvest config layout (keys and their meaning), not of the
 # values. When the layout changes: bump it and add an upgrade to UPGRADES.
 HARVEST_CONFIG_SCHEMA_VERSION = 2
-DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "data" / "harvest_config.json"
+DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "config" / "harvest_config.json"
+
+
+def _add_setting(content: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
+    """Add a setting that a newer version introduced; refuse it if already there."""
+    if key in content:
+        raise HarvestConfigError(
+            f"schema_version {content['schema_version']} has no setting {key!r}; "
+            "check the schema_version of the file"
+        )
+    return content | {key: value}
 
 
 def _add_nomad_url(content: dict[str, Any]) -> dict[str, Any]:
     """Version 2 adds `nomad_url`; empty keeps projects in the local NOMAD."""
-    return content | {"nomad_url": ""}
+    return _add_setting(content, "nomad_url", "")
 
 
 # UPGRADES[n] turns the content of a version-n file into version n + 1.
@@ -35,7 +45,7 @@ UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
 
 
 class HarvestConfigError(ValueError):
-    """The config file has a missing, unknown or unsupported schema version."""
+    """The harvest config cannot be used: bad JSON, schema version or setting."""
 
 
 class HarvestConfig(BaseModel):
@@ -44,7 +54,9 @@ class HarvestConfig(BaseModel):
     # Unknown keys are errors, so a typo in the file does not go unnoticed.
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = HARVEST_CONFIG_SCHEMA_VERSION
+    schema_version: Literal[HARVEST_CONFIG_SCHEMA_VERSION] = (
+        HARVEST_CONFIG_SCHEMA_VERSION
+    )
     zenodo_url: str = Field(
         description="Base URL of the Zenodo (InvenioRDM) instance to search."
     )
@@ -101,7 +113,7 @@ class HarvestConfig(BaseModel):
     )
 
 
-def upgrade(
+def upgrade_content(
     content: dict[str, Any],
     *,
     current: int = HARVEST_CONFIG_SCHEMA_VERSION,
@@ -109,9 +121,11 @@ def upgrade(
 ) -> dict[str, Any]:
     """Bring config content of any supported version to version `current`.
 
+    The steps run in memory; the file itself is never rewritten.
+
     Raises:
         HarvestConfigError: the version is missing, not a positive integer,
-            newer than `current`, or has no upgrade step.
+            newer than `current`, has no upgrade step, or does not match the content.
     """
     version = content.get("schema_version")
     if type(version) is not int or version < 1:
@@ -132,6 +146,24 @@ def upgrade(
     return content
 
 
+def upgrade(content: dict[str, Any]) -> HarvestConfig:
+    """Validate config content, upgrading it first when it has an older version.
+
+    Raises:
+        HarvestConfigError: unsupported version, or a setting is missing,
+            unknown or invalid; the message names each bad setting.
+    """
+    content = upgrade_content(content)
+    try:
+        return HarvestConfig.model_validate(content)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or 'file'}: {e['msg']}"
+            for e in error.errors()
+        )
+        raise HarvestConfigError(problems) from error
+
+
 def load_harvest_config(path: str | Path | None = None) -> HarvestConfig:
     """Read, upgrade and validate a harvest config file.
 
@@ -139,8 +171,17 @@ def load_harvest_config(path: str | Path | None = None) -> HarvestConfig:
         path: config file; the one shipped with the Action if None.
 
     Raises:
-        HarvestConfigError: unsupported schema version (see `upgrade`).
-        pydantic.ValidationError: a setting is missing, unknown or invalid.
+        FileNotFoundError: the file does not exist.
+        HarvestConfigError: the file is not valid JSON or not a valid config;
+            the message starts with the file path.
     """
-    content = json.loads(Path(path or DEFAULT_HARVEST_CONFIG).read_text("utf-8"))
-    return HarvestConfig.model_validate(upgrade(content))
+    path = Path(path or DEFAULT_HARVEST_CONFIG)
+    try:
+        content = json.loads(path.read_text("utf-8"))
+        if not isinstance(content, dict):
+            raise HarvestConfigError("must hold a JSON object")
+        return upgrade(content)
+    except json.JSONDecodeError as error:
+        raise HarvestConfigError(f"{path}: not valid JSON ({error})") from error
+    except HarvestConfigError as error:
+        raise HarvestConfigError(f"{path}: {error}") from error

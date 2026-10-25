@@ -25,6 +25,7 @@
     "python"
   ],
   "words": [
+    "caplog",
     "conceptdoi",
     "conceptrecid",
     "delenv",

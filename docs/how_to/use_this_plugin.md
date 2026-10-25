@@ -57,7 +57,7 @@ Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed f
 ### Worker settings
 
 Settings that stay with the installation are in the harvest config file
-(`actions/zenodo_harvest/data/harvest_config.json`, or the file in the entry point's
+(`actions/zenodo_harvest/config/harvest_config.json`, or the file in the entry point's
 `harvest_config_path`). Secrets are only read from the worker's environment:
 
 | Variable | Needed for |

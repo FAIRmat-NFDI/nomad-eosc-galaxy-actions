@@ -62,7 +62,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 nomad_eosc_galaxy_actions = [
     "actions/find_peaks/data/*.ga",
-    "actions/zenodo_harvest/data/*.json",
+    "actions/zenodo_harvest/config/*.json",
     "example_uploads/find_peaks/*",
 ]
 

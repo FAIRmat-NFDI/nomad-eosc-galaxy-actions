@@ -30,6 +30,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     RUN_CONFIG_FILE,
     RUN_CONFIG_SCHEMA_VERSION,
     SKIPPED_FILES_FILE,
+    SKIPPED_FILES_SCHEMA_VERSION,
     STATE_FILE,
     WORK_LIST_FILE,
     ZENODO_HARVEST_ACTION,
@@ -68,6 +69,8 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
     ZenodoHarvestWorkflow,
 )
+from nomad_eosc_galaxy_actions.report import REPORT_SCHEMA_VERSION
+from nomad_eosc_galaxy_actions.work_list import WORK_LIST_SCHEMA_VERSION
 
 
 def _prepare_input(**overrides) -> PrepareRunInput:
@@ -407,17 +410,35 @@ def test_fetch_manifest_detects_placeholder(tmp_path, galaxy_config):
     assert result.results_path is None
 
 
-def test_fetch_manifest_real_output(tmp_path, galaxy_config):
+def test_fetch_manifest_real_output(tmp_path, galaxy_config, caplog):
     _work_list(tmp_path)
     galaxy_config.output = json.dumps({"run_id": "run-1", "files": []}).encode()
     galaxy_config.results = b'{"run_id": "run-1"}'
 
-    result = _fetch(tmp_path, results_dataset_id="out-2")
+    with caplog.at_level("INFO"):
+        result = _fetch(tmp_path, results_dataset_id="out-2")
 
     assert result.placeholder is False
+    assert "Galaxy manifest for run run-1: 0 files (none)" in caplog.text
+    assert "results: yes" in caplog.text
     assert json.loads(Path(result.manifest_path).read_text())["files"] == []
     assert Path(result.results_path) == tmp_path / RESULTS_FILE
     assert Path(result.results_path).read_bytes() == galaxy_config.results
+
+
+def test_fetch_manifest_logs_a_summary(tmp_path, galaxy_config, caplog):
+    _work_list(tmp_path)
+    files = [{"action": a} for a in ("process", "process", "skipped", "already_known")]
+    manifest = {"run_id": "run-1", "tool_version": "0.1", "files": files}
+    galaxy_config.output = json.dumps(manifest).encode()
+
+    with caplog.at_level("INFO"):
+        _fetch(tmp_path)
+
+    assert (
+        "Galaxy manifest for run run-1: 4 files (1 already_known, 2 process, "
+        "1 skipped), tool_version 0.1; results: no"
+    ) in caplog.text
 
 
 def test_fetch_manifest_rejects_other_run(tmp_path, galaxy_config):
@@ -694,6 +715,32 @@ async def test_workflow_creates_projects_and_merges(
     report = json.loads(Path(result["report_path"]).read_text())
     assert report["records"][0]["upload_id"] == "up-1"
     assert report["failed_files"] == []
+
+
+@pytest.mark.asyncio
+async def test_every_written_file_has_its_schema_version(
+    actions_fs, nomad_config, fake_galaxy
+):
+    from nomad_eosc_galaxy_actions import state_store  # noqa: PLC0415
+
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+    _real_galaxy(fake_galaxy, workflow_id)
+
+    result = await _run_workflow(workflow_id, dry_run=False)
+
+    run_dir = Path(result["run_dir"])
+    versions = {
+        RUN_CONFIG_FILE: RUN_CONFIG_SCHEMA_VERSION,
+        CANDIDATES_FILE: CANDIDATES_SCHEMA_VERSION,
+        WORK_LIST_FILE: WORK_LIST_SCHEMA_VERSION,
+        SKIPPED_FILES_FILE: SKIPPED_FILES_SCHEMA_VERSION,
+        REPORT_FILE: REPORT_SCHEMA_VERSION,
+    }
+    for name, version in versions.items():
+        content = json.loads((run_dir / name).read_text())
+        assert content["schema_version"] == version, name
+    with state_store.StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+        assert store.schema_version == state_store.STATE_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio
