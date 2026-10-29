@@ -76,6 +76,7 @@ class FileResult(BaseModel):
     sha256: str
     status: Literal["success", "failed"]
     error: str | None = None
+    nexus_path: str | None = None  # the NeXus file's path in the project zip
 
 
 class Results(BaseModel):

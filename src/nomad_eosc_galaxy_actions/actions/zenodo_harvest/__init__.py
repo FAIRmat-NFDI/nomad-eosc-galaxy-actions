@@ -47,6 +47,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
             email_report,
             fetch_manifest,
             fetch_projects,
+            finish_run,
             merge_state,
             poll_galaxy,
             prepare_run,
@@ -73,6 +74,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
                 merge_state,
                 write_report,
                 email_report,
+                finish_run,
             ],
         )
 

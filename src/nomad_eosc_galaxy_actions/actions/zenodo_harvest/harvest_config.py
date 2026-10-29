@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # Version of the harvest config layout (keys and their meaning), not of the
 # values. When the layout changes: bump it and add an upgrade to UPGRADES.
-HARVEST_CONFIG_SCHEMA_VERSION = 2
+HARVEST_CONFIG_SCHEMA_VERSION = 3
 DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "config" / "harvest_config.json"
 
 
@@ -38,9 +38,15 @@ def _add_nomad_url(content: dict[str, Any]) -> dict[str, Any]:
     return _add_setting(content, "nomad_url", "")
 
 
+def _add_state_dir(content: dict[str, Any]) -> dict[str, Any]:
+    """Version 3 adds `state_dir`; empty keeps the states in NOMAD's artifacts."""
+    return _add_setting(content, "state_dir", "")
+
+
 # UPGRADES[n] turns the content of a version-n file into version n + 1.
 UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     1: _add_nomad_url,
+    2: _add_state_dir,
 }
 
 
@@ -109,6 +115,13 @@ class HarvestConfig(BaseModel):
         description=(
             "NOMAD API URL (ending in /api/v1) where projects are created, "
             "using the worker's NOMAD_PAT. Empty: the NOMAD that runs the Action."
+        )
+    )
+    state_dir: str = Field(
+        description=(
+            "Folder of the per-user harvest states and the checksum index, e.g. a "
+            "mounted volume. Empty: NOMAD's persistent action artifacts folder "
+            "(<fs.actions>/artifacts/zenodo_harvest)."
         )
     )
 

@@ -103,12 +103,14 @@ def plan_record(
     return (work + context if work else []), skipped
 
 
-def build_work_list(
+def build_work_list(  # noqa: PLR0913
     candidates: Iterable[ZenodoRecord],
     store: StateStore,
     settings: WorkListSettings,
+    *,
     run_id: str,
     max_records: int | None = None,
+    in_projects: Iterable[str] = (),
 ) -> tuple[dict[str, Any], list[SkippedFile]]:
     """Build the content of `work_list.json` and the list of skipped files.
 
@@ -117,9 +119,11 @@ def build_work_list(
 
     Each listed record carries its metadata (context for the conversion),
     the files to download and `known_sha256`: raw files of the same concept
-    record that already have a final status, so Galaxy does not convert them
+    record that already have a final status, plus `in_projects` (raw files
+    already in one of the user's projects), so Galaxy does not convert them
     again when they show up in a new archive.
     """
+    in_projects = set(in_projects)
     records: list[dict[str, Any]] = []
     skipped: list[SkippedFile] = []
     for record in candidates:
@@ -140,7 +144,9 @@ def build_work_list(
                 "creators": record.creators,
                 "description_html": record.description_html,
                 "download": [_file_entry(file) for file in download],
-                "known_sha256": store.known_sha256(record.concept_record_id),
+                "known_sha256": sorted(
+                    in_projects.union(store.known_sha256(record.concept_record_id))
+                ),
             }
         )
     work_list = {

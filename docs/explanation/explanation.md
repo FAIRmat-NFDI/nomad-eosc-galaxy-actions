@@ -87,7 +87,8 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 | File | Version constant | Written or read by |
 |---|---|---|
 | `harvest_config.json` | `HARVEST_CONFIG_SCHEMA_VERSION` | `load_harvest_config` |
-| `state.sqlite` | `STATE_SCHEMA_VERSION` | `StateStore` |
+| `users/<user_id>/state.json` | `STATE_SCHEMA_VERSION` | `StateStore` |
+| `checksum_index.json` | `CHECKSUM_INDEX_SCHEMA_VERSION` | `ChecksumIndex` |
 
 **Contract with Galaxy, checked strictly.** The plugin and the Galaxy tools must agree on these; another version is rejected, not upgraded.
 
@@ -96,6 +97,12 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 | `work_list.json` | `WORK_LIST_SCHEMA_VERSION` | `build_work_list` |
 | `manifest.json`, `results.json` | `Literal[1]` in `Manifest`, `Results` | `fetch_manifest`, `merge_manifest` |
 
+**Written into each NOMAD project.**
+
+| File | Version constant | Written or read by |
+|---|---|---|
+| `zenodo_harvest.json` | `HARVEST_METADATA_SCHEMA_VERSION` | `add_harvest_metadata` |
+
 **Records of one run.** Read only within the same run; the version tells people and scripts which layout an old run folder has.
 
 | File | Version constant | Written or read by |
@@ -103,4 +110,5 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 | `run_config.json` | `RUN_CONFIG_SCHEMA_VERSION` | `write_run_config` |
 | `candidates.json` | `CANDIDATES_SCHEMA_VERSION` | `write_candidates` |
 | `skipped_files.json` | `SKIPPED_FILES_SCHEMA_VERSION` | `write_work_list` |
+| `duplicates.json` | `DUPLICATES_SCHEMA_VERSION` | `fetch_manifest` |
 | `report.json` | `REPORT_SCHEMA_VERSION` | `build_report` |

@@ -32,7 +32,7 @@ SETTINGS = WorkListSettings(
 
 @pytest.fixture
 def store(tmp_path):
-    with StateStore(tmp_path / "state.sqlite") as store:
+    with StateStore(tmp_path / "state.json") as store:
         yield store
 
 
@@ -97,10 +97,15 @@ def _next_download(store, *files: tuple[str, str]) -> list[str]:
     return [file.key for file in plan_record(record, store, SETTINGS)[0]]
 
 
+def _file_state(store, sha256) -> dict:
+    files = store.snapshot()["files"]
+    [file] = [f[sha256] for f in files.values() if sha256 in f]
+    return file
+
+
 def _status(store, sha256):
-    return store._db.execute(
-        "SELECT status, error, archive_md5 FROM files WHERE sha256 = ?", (sha256,)
-    ).fetchone()
+    file = _file_state(store, sha256)
+    return file["status"], file["error"], file["archive_md5"]
 
 
 def test_new_record_records_files_and_resolves_archive(store):
@@ -149,10 +154,7 @@ def test_already_known_file_is_not_rewritten(store):
     )
 
     assert summary == MergeSummary()
-    row = store._db.execute(
-        "SELECT tool_version FROM files WHERE sha256 = 'sha-a'"
-    ).fetchone()
-    assert row == ("0.1",)
+    assert _file_state(store, "sha-a")["tool_version"] == "0.1"
 
 
 def test_loose_raw_file_with_known_md5_is_not_downloaded(store):
@@ -195,7 +197,7 @@ def test_archive_without_md5_is_not_stored(store):
     summary = _merge(store, archives=[_archive(md5=None)])
 
     assert summary == MergeSummary()
-    assert store._db.execute("SELECT COUNT(*) FROM archives").fetchone() == (0,)
+    assert store.snapshot()["archives"] == {}
 
 
 def test_newer_tool_version_retries_failed_files(store):
@@ -230,8 +232,8 @@ def test_upload_id_is_stored_per_record(store):
         upload_ids={"101": "upload-1"},
     )
 
-    rows = store._db.execute("SELECT sha256, upload_id FROM files ORDER BY sha256")
-    assert rows.fetchall() == [("sha-a", "upload-1"), ("sha-b", None)]
+    upload_ids = [_file_state(store, sha)["upload_id"] for sha in ("sha-a", "sha-b")]
+    assert upload_ids == ["upload-1", None]
 
 
 def test_record_without_project_is_left_out(store):

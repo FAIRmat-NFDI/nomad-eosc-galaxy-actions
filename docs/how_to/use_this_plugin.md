@@ -36,6 +36,24 @@ Start it from **Actions** in the main menu. No project needs to be selected.
 | `max_records` | Process at most this many Zenodo records with new work. Empty means no limit. |
 | `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
 | `max_runs` | With `repeat_every_days`: stop after this many runs. Empty means until the Action is stopped. |
+| `allow_duplicate_projects` | Default off. On: also convert raw files that are already in one of your NOMAD projects. |
+| `galaxy_api_key` | Your Galaxy API key. Empty uses the worker's `GALAXY_API_KEY`, if the administrators set one. |
+| `zenodo_token` | Optional Zenodo token for larger search pages. Empty uses the worker's `ZENODO_TOKEN`, if set. |
+
+The two keys are secrets: the form hides them, and they are never written to the run folder, the
+report, the logs or Galaxy. See [NOMAD: Individual user secrets](https://docs.nomad-lab.eu/howto/plugins/types/actions.html#individual-user-secrets){:target="_blank" rel="noopener"}.
+
+### One run per user
+
+Each user has their own record of processed files, so users do not block each other. A user can
+run one harvest at a time; a second one fails at once with the ID of the active run.
+
+### Duplicate projects
+
+A raw file is recognized by its SHA-256 checksum. If it is already in one of your NOMAD projects,
+it is not converted again and the report lists it as `duplicate`, with the project's upload ID.
+Other users' private projects do not count. Each project holds a `zenodo_harvest.json` file with
+its Zenodo record and the checksums of its raw and NeXus files.
 
 ### Repeated runs
 
@@ -52,20 +70,27 @@ Already processed files are not handled twice.
 ### Report
 
 Each run writes `report.json` and `report.md` into its run folder: the Zenodo search, the work list,
-Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed file with its reason.
+Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed file with its reason,
+duplicates included. It is emailed to the address of your NOMAD account.
 
 ### Worker settings
 
 Settings that stay with the installation are in the harvest config file
 (`actions/zenodo_harvest/config/harvest_config.json`, or the file in the entry point's
-`harvest_config_path`). Secrets are only read from the worker's environment:
+`harvest_config_path`). `state_dir` sets where the records of processed files are kept; empty
+means NOMAD's action artifacts folder.
+
+The report email uses NOMAD's own mail server: the
+[`mail` section of `nomad.yaml`](https://docs.nomad-lab.eu/reference/config.html#mail){:target="_blank" rel="noopener"}.
+Without `mail.enabled`, no email is sent.
+
+Secrets that are not entered in the form are read from the worker's environment:
 
 | Variable | Needed for |
 |---|---|
-| `GALAXY_API_KEY` | running the Galaxy workflow |
+| `GALAXY_API_KEY` | running the Galaxy workflow, when the form has no `galaxy_api_key` |
+| `ZENODO_TOKEN` | optional: larger Zenodo result pages, when the form has no `zenodo_token` |
 | `NOMAD_PAT` | creating projects through the REST API (only when `nomad_url` is set in the harvest config) |
-| `ZENODO_TOKEN` | optional: larger Zenodo result pages |
-| `HARVEST_SMTP_HOST`, `HARVEST_SMTP_PORT`, `HARVEST_SMTP_FROM`, `HARVEST_SMTP_USER`, `HARVEST_SMTP_PASSWORD` | emailing the report; without a host no email is sent |
 
 ## Troubleshooting
 

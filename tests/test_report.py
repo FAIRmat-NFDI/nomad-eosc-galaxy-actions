@@ -205,6 +205,27 @@ def test_failure_in_the_first_step_hides_empty_counts():
     assert "0 candidates" not in text
 
 
+def test_duplicates_are_skipped_files_with_their_project():
+    duplicates = {
+        "duplicates": [
+            {
+                "record_id": "101",
+                "key": "d/a.sxm",
+                "sha256": "sha-a",
+                "upload_id": "up-7",
+                "reason": "duplicate",
+            }
+        ]
+    }
+
+    report = _report(duplicates=duplicates)
+
+    assert report["skipped_files"] == SKIPPED["skipped"] + duplicates["duplicates"]
+    text = render_markdown(report)
+    assert "| 101 | d/a.sxm | duplicate (in project up-7) |" in text
+    assert "| 101 | big.zip | too_large |" in text
+
+
 def test_email_subject():
     assert email_subject(_report()) == "Zenodo harvest report 2026-10-21"
     failed = _report(steps={"failure": {"step": "merge", "error": "x"}})

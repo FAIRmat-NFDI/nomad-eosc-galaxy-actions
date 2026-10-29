@@ -148,8 +148,15 @@ def test_upgrade_from_middle_version():
 
 
 def _version_1(shipped: dict) -> dict:
-    content = {k: v for k, v in shipped.items() if k != "nomad_url"}
+    content = {k: v for k, v in shipped.items() if k not in ("nomad_url", "state_dir")}
     return content | {"schema_version": 1}
+
+
+def test_version_2_file_gets_empty_state_dir(tmp_path, shipped):
+    content = {k: v for k, v in shipped.items() if k != "state_dir"}
+    path = _write(tmp_path, content | {"schema_version": 2})
+
+    assert load_harvest_config(path).state_dir == ""
 
 
 def test_old_file_is_upgraded_and_never_rewritten(tmp_path, shipped):

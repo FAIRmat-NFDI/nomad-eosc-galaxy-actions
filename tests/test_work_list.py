@@ -30,7 +30,7 @@ SETTINGS = WorkListSettings(
 
 @pytest.fixture
 def store(tmp_path):
-    with StateStore(tmp_path / "state.sqlite") as store:
+    with StateStore(tmp_path / "state.json") as store:
         yield store
 
 
@@ -226,3 +226,15 @@ def test_build_work_list_on_recorded_hits(store, zenodo_hits):
 
 def _keys_of(entry: dict) -> list[str]:
     return [f["key"] for f in entry["download"]]
+
+
+def test_files_in_projects_are_known_for_every_record(store):
+    with store.transaction():
+        store.record_file(CID, "sha-own", status="success")
+    record = _record(("v1.zip", 10, "m"), record_id="101")
+
+    content, _ = build_work_list(
+        [record], store, SETTINGS, run_id="r", in_projects=["sha-elsewhere"]
+    )
+
+    assert content["records"][0]["known_sha256"] == ["sha-elsewhere", "sha-own"]

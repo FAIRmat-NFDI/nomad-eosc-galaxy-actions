@@ -3,6 +3,7 @@
 # This file is part of nomad-eosc-galaxy-actions.
 #
 # SPDX-License-Identifier: Apache-2.0
+import hashlib
 import json
 import zipfile
 from pathlib import Path
@@ -10,11 +11,15 @@ from pathlib import Path
 import pytest
 import requests
 
+from nomad_eosc_galaxy_actions.manifest import Manifest, Results
 from nomad_eosc_galaxy_actions.nomad_projects import (
+    HARVEST_METADATA_FILE,
+    HARVEST_METADATA_SCHEMA_VERSION,
     MAX_DEMO_PROJECTS,
     METADATA_FILE,
     ProjectLimitReached,
     RestProjects,
+    add_harvest_metadata,
     add_project_metadata,
     create_project,
     project_name,
@@ -49,6 +54,95 @@ def zip_path(tmp_path) -> Path:
 
 def test_project_name():
     assert NAME == "zgn-demo-100-101"
+
+
+# add_harvest_metadata
+
+RECORD = {
+    "record_id": "101",
+    "concept_record_id": "100",
+    "version_doi": "10.5281/zenodo.101",
+    "concept_doi": None,
+    "title": "not copied",
+}
+
+
+def _raw(path, sha256, record_id="101", action="process"):
+    return {
+        "concept_record_id": "100",
+        "record_id": record_id,
+        "source": "archive",
+        "path": path,
+        "size": 1,
+        "sha256": sha256,
+        "role": "raw",
+        "action": action,
+    }
+
+
+def _harvest_inputs():
+    manifest = Manifest(
+        schema_version=1,
+        run_id="r",
+        tool_version="0.1",
+        files=[
+            _raw("d/scan_2.sxm", "sha-2"),  # conversion failed: no NeXus file
+            _raw("d/scan_1.sxm", "sha-1"),
+            _raw("d/known.sxm", "sha-k", action="already_known"),
+            _raw("d/other.sxm", "sha-o", record_id="102"),
+        ],
+    )
+    results = Results(
+        schema_version=1,
+        run_id="r",
+        files=[
+            {"sha256": "sha-1", "status": "success", "nexus_path": "scan_1/scan_1.nxs"},
+            {"sha256": "sha-2", "status": "failed", "nexus_path": "missing.nxs"},
+        ],
+    )
+    return manifest, results
+
+
+def test_harvest_metadata_lists_the_records_raw_and_nexus_checksums(zip_path):
+    add_harvest_metadata(zip_path, RECORD, *_harvest_inputs())
+
+    with zipfile.ZipFile(zip_path) as archive:
+        content = json.loads(archive.read(HARVEST_METADATA_FILE))
+    assert content == {
+        "schema_version": HARVEST_METADATA_SCHEMA_VERSION,
+        "zenodo": {
+            "record_id": "101",
+            "concept_record_id": "100",
+            "version_doi": "10.5281/zenodo.101",
+            "concept_doi": None,
+        },
+        "files": [
+            {
+                "raw_path": "d/scan_1.sxm",
+                "raw_sha256": "sha-1",
+                "nexus_path": "scan_1/scan_1.nxs",
+                "nexus_sha256": hashlib.sha256(b"nexus").hexdigest(),
+            },
+            {
+                "raw_path": "d/scan_2.sxm",
+                "raw_sha256": "sha-2",
+                "nexus_path": None,
+                "nexus_sha256": None,
+            },
+        ],
+    }
+
+
+def test_harvest_metadata_is_retry_safe(zip_path):
+    add_harvest_metadata(zip_path, RECORD, *_harvest_inputs())
+    add_harvest_metadata(zip_path, RECORD, *_harvest_inputs())
+
+    with zipfile.ZipFile(zip_path) as archive:
+        assert archive.namelist().count(HARVEST_METADATA_FILE) == 1
+    with pytest.raises(ValueError, match="another zenodo_harvest.json"):
+        add_harvest_metadata(
+            zip_path, RECORD | {"record_id": "999"}, *_harvest_inputs()
+        )
 
 
 # add_project_metadata

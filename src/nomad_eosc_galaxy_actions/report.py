@@ -25,8 +25,9 @@ from nomad_eosc_galaxy_actions.manifest import (
     file_status,
 )
 
-# Version of the report.json layout (keys and their meaning); 2 adds `failure`.
-REPORT_SCHEMA_VERSION = 2
+# Version of the report.json layout (keys and their meaning); 2 adds `failure`,
+# 3 adds duplicate raw files (with their `upload_id`) to `skipped_files`.
+REPORT_SCHEMA_VERSION = 3
 
 
 def failed_files(manifest: Manifest, results: Results) -> list[dict[str, str]]:
@@ -53,6 +54,7 @@ def build_report(  # noqa: PLR0913
     manifest: Manifest | None,
     results: Results | None,
     steps: dict[str, Any],
+    duplicates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect the content of `report.json` from the run's files.
 
@@ -91,10 +93,18 @@ def build_report(  # noqa: PLR0913
             "rejected": dict(sorted(rejected.items())),
         },
         "records": records,
-        "skipped_files": (skipped_files or {}).get("skipped", []),
+        "skipped_files": (skipped_files or {}).get("skipped", [])
+        + (duplicates or {}).get("duplicates", []),
         "failed_files": failed,
         "steps": steps,
     }
+
+
+def _reason(skipped: dict[str, Any]) -> str:
+    """The reason, naming the project that already holds a duplicate."""
+    if skipped.get("upload_id"):
+        return f"{skipped['reason']} (in project {skipped['upload_id']})"
+    return skipped["reason"]
 
 
 def email_subject(report: dict[str, Any]) -> str:
@@ -177,7 +187,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         [r["record_id"], r["title"], r["doi"], r["upload_id"] or r["left_out"]]
         for r in report["records"]
     ]
-    skipped = [[s["record_id"], s["key"], s["reason"]] for s in report["skipped_files"]]
+    skipped = [[s["record_id"], s["key"], _reason(s)] for s in report["skipped_files"]]
     failed = [[f["record_id"], f["path"], f["error"]] for f in report["failed_files"]]
     dry_run = ", **dry run** (no NOMAD projects, state unchanged)"
     return (

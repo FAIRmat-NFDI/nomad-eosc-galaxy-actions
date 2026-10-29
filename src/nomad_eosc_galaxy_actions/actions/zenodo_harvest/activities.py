@@ -12,7 +12,9 @@ is testable without a NOMAD installation or a Temporal worker.
 
 import json
 import os
+import re
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from nomad_eosc_galaxy_actions import (
+    checksum_index,
+    credentials,
     galaxy_client,
     mailer,
     nomad_projects,
@@ -27,7 +31,6 @@ from nomad_eosc_galaxy_actions import (
     work_list,
     zenodo_client,
 )
-from nomad_eosc_galaxy_actions.actions.find_peaks.resolve import resolve_api_key
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
     HarvestConfigError,
@@ -47,6 +50,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     FetchManifestResult,
     FetchProjectsInput,
     FetchProjectsResult,
+    FinishRunInput,
     MergeStateInput,
     PollGalaxyInput,
     PollGalaxyResult,
@@ -65,7 +69,12 @@ from nomad_eosc_galaxy_actions.manifest import (
     Results,
     merge_manifest,
 )
-from nomad_eosc_galaxy_actions.state_store import StateStore
+from nomad_eosc_galaxy_actions.state_store import (
+    RunLockedError,
+    StateStore,
+    acquire_run,
+    release_run,
+)
 
 ZENODO_HARVEST_ACTION = (
     "nomad_eosc_galaxy_actions.actions.zenodo_harvest:zenodo_harvest_action"
@@ -81,8 +90,20 @@ WORK_LIST_FILE = "work_list.json"
 SKIPPED_FILES_FILE = "skipped_files.json"
 # Version of the skipped_files.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
 SKIPPED_FILES_SCHEMA_VERSION = 1
-# State shared by all runs, inside NOMAD's persistent action artifacts folder.
-STATE_FILE = Path("zenodo_harvest") / "state.sqlite"
+# Default folder of the states (harvest config `state_dir`), inside NOMAD's
+# persistent action artifacts folder: users/<user_id>/state.json and the
+# checksum index of all users.
+STATE_DIR = "zenodo_harvest"
+STATE_FILE = "state.json"
+CHECKSUM_INDEX_FILE = "checksum_index.json"
+# Longer than any run (Galaxy is polled for at most a day), so an older mark
+# of an active run is from a run that ended without removing it.
+RUN_MAX_AGE = timedelta(days=2)
+# NOMAD user IDs are UUIDs; anything else must not become a folder name.
+USER_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+DUPLICATES_FILE = "duplicates.json"
+# Version of the duplicates.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
+DUPLICATES_SCHEMA_VERSION = 1
 MANIFEST_FILE = "manifest.json"
 RESULTS_FILE = "results.json"
 PROJECTS_DIR = "projects"
@@ -107,10 +128,35 @@ def _harvest_config() -> HarvestConfig:
         raise ApplicationError(str(error), non_retryable=True) from error
 
 
-def _state_path() -> Path:
+def _secret(service: str, form_value, *, required: bool = True) -> str | None:
+    """A secret from the form or the worker; a missing one is not retried."""
+    try:
+        return credentials.resolve_secret(service, form_value, required=required)
+    except credentials.MissingSecretError as error:
+        raise ApplicationError(str(error), non_retryable=True) from error
+
+
+def _state_dir(harvest_config: HarvestConfig) -> Path:
     from nomad.actions.manager import action_artifacts_dir  # noqa: PLC0415
 
-    return Path(action_artifacts_dir()) / STATE_FILE
+    return Path(harvest_config.state_dir or Path(action_artifacts_dir()) / STATE_DIR)
+
+
+def _user_dir(harvest_config: HarvestConfig, user_id: str) -> Path:
+    """The folder of one user's state; the user ID must be a safe name."""
+    if not USER_ID_PATTERN.fullmatch(user_id):
+        raise ApplicationError(f"unexpected user ID {user_id!r}", non_retryable=True)
+    return _state_dir(harvest_config) / "users" / user_id
+
+
+def _state_path(harvest_config: HarvestConfig, user_id: str) -> Path:
+    return _user_dir(harvest_config, user_id) / STATE_FILE
+
+
+def _checksum_index(harvest_config: HarvestConfig) -> checksum_index.ChecksumIndex:
+    return checksum_index.ChecksumIndex(
+        _state_dir(harvest_config) / CHECKSUM_INDEX_FILE
+    )
 
 
 def write_run_config(
@@ -155,14 +201,29 @@ def write_run_config(
 
 @activity.defn
 def prepare_run(data: PrepareRunInput) -> PrepareRunResult:
-    """Create this run's artifacts folder and record its effective configuration."""
+    """Mark the run as the user's active one, create its artifacts folder and
+    record its effective configuration.
+
+    A second run of the same user fails at once: both would plan the same files.
+    """
     from nomad.actions.manager import action_instance_artifacts_dir  # noqa: PLC0415
 
-    harvest_config = _harvest_config().model_dump(mode="json")
+    harvest_config = _harvest_config()
+    try:
+        acquire_run(
+            _user_dir(harvest_config, data.user_id),
+            data.run_id,
+            now=datetime.now(timezone.utc),
+            max_age=RUN_MAX_AGE,
+        )
+    except RunLockedError as error:
+        raise ApplicationError(
+            f"{error}; wait until it ends or stop it", non_retryable=True
+        ) from error
     run_dir = Path(action_instance_artifacts_dir(data.action_instance_id))
     if data.run_folder:
         run_dir /= data.run_folder
-    path = write_run_config(run_dir, harvest_config, data)
+    path = write_run_config(run_dir, harvest_config.model_dump(mode="json"), data)
     activity.logger.info("Prepared harvest run in %s", run_dir)
     return PrepareRunResult(run_dir=str(run_dir), run_config_path=str(path))
 
@@ -194,11 +255,11 @@ def write_candidates(
 def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
     """Search Zenodo and write the candidates of this run to candidates.json.
 
-    An optional ZENODO_TOKEN environment variable on the worker (an
-    institute-wide secret) allows larger pages.
+    An optional Zenodo token (form field, else the worker's ZENODO_TOKEN)
+    allows larger pages.
     """
     harvest_config = _harvest_config()
-    token = os.environ.get("ZENODO_TOKEN")
+    token = _secret("zenodo", data.zenodo_token, required=False)
     hits = zenodo_client.iter_search_hits(
         zenodo_client.make_session(token),
         harvest_config.zenodo_query,
@@ -248,9 +309,11 @@ def write_work_list(
 
 @activity.defn
 def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
-    """Compare this run's candidates with the state and write the work list.
+    """Compare this run's candidates with the user's state and write the work list.
 
     Only reads the state; it is updated after Galaxy's manifest is complete.
+    Unless duplicates are allowed, raw files already in one of the user's
+    projects are sent to Galaxy as known, so they are not converted again.
     """
     harvest_config = _harvest_config()
     settings = work_list.WorkListSettings.model_validate(
@@ -263,13 +326,19 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
         zenodo_client.ZenodoRecord.model_validate(record)
         for record in search_result["candidates"]
     ]
-    with StateStore(_state_path()) as store:
+    in_projects = (
+        []
+        if data.allow_duplicate_projects
+        else _checksum_index(harvest_config).known_sha256(data.user_id)
+    )
+    with StateStore(_state_path(harvest_config, data.user_id)) as store:
         content, skipped = work_list.build_work_list(
             candidates,
             store,
             settings,
             run_id=data.run_id,
             max_records=data.max_records,
+            in_projects=in_projects,
         )
     path = write_work_list(data.run_dir, content, skipped)
     records = content["records"]
@@ -290,12 +359,12 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
 def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     """Upload the work list to a new Galaxy history and start the workflow.
 
-    The API key comes from the worker's GALAXY_API_KEY environment variable,
-    so it never appears in the run's inputs, files or logs.
+    The API key comes from the form, else the worker's GALAXY_API_KEY; it is
+    never written to the run's files, logs or Galaxy parameters.
     """
     harvest_config = _harvest_config()
     result = galaxy_client.upload_and_invoke(
-        api_key=resolve_api_key(None),
+        api_key=_secret("galaxy", data.galaxy_api_key),
         workflow_id=harvest_config.galaxy_workflow_id,
         file_path=data.work_list_path,
         file_type="json",
@@ -311,7 +380,7 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
 def poll_galaxy(data: PollGalaxyInput) -> PollGalaxyResult:
     """Check the invocation's status once; the workflow sleeps between calls."""
     result = galaxy_client.poll_invocation(
-        api_key=resolve_api_key(None),
+        api_key=_secret("galaxy", data.galaxy_api_key),
         invocation_id=data.invocation_id,
         galaxy_url=_harvest_config().galaxy_url,
     )
@@ -326,12 +395,13 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
     the work list that was sent.
     """
     harvest_config = _harvest_config()
+    api_key = _secret("galaxy", data.galaxy_api_key)
     run_dir = Path(data.run_dir)
 
     def download(dataset_id: str, name: str) -> Path:
         path = run_dir / name
         galaxy_client.download_dataset(
-            api_key=resolve_api_key(None),
+            api_key=api_key,
             dataset_id=dataset_id,
             output_path=path,
             galaxy_url=harvest_config.galaxy_url,
@@ -363,6 +433,7 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
             manifest.get("tool_version"),
             "yes" if data.results_dataset_id else "no",
         )
+        _write_duplicates(run_dir, manifest, harvest_config, data.user_id)
     results_path = None
     if data.results_dataset_id:
         results_path = str(download(data.results_dataset_id, RESULTS_FILE))
@@ -371,11 +442,35 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
     )
 
 
+def _write_duplicates(
+    run_dir: Path, manifest: dict[str, Any], harvest_config: HarvestConfig, user_id: str
+) -> None:
+    """Log the raw files Galaxy skipped because a project of the user has them,
+    and write them to `duplicates.json` for the report."""
+    duplicates = checksum_index.find_duplicates(
+        manifest, _checksum_index(harvest_config), user_id
+    )
+    for duplicate in duplicates:
+        activity.logger.info(
+            "Raw file %s (sha256 %s) is already in NOMAD project %s; skipped",
+            duplicate.key,
+            duplicate.sha256[:12],
+            duplicate.upload_id,
+        )
+    content = {
+        "schema_version": DUPLICATES_SCHEMA_VERSION,
+        "duplicates": [duplicate.model_dump(mode="json") for duplicate in duplicates],
+    }
+    (run_dir / DUPLICATES_FILE).write_text(
+        json.dumps(content, indent=2), encoding="utf-8"
+    )
+
+
 @activity.defn
 def fetch_projects(data: FetchProjectsInput) -> FetchProjectsResult:
     """Download Galaxy's project zips to `run_dir/projects/<record ID>.zip`."""
     harvest_config = _harvest_config()
-    api_key = resolve_api_key(None)
+    api_key = _secret("galaxy", data.galaxy_api_key)
     elements = galaxy_client.collection_elements(
         api_key, data.collection_id, galaxy_url=harvest_config.galaxy_url
     )
@@ -418,7 +513,8 @@ def _projects(harvest_config: HarvestConfig, user_id: str) -> nomad_projects.Pro
 def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
     """Create one private NOMAD project per record version zip.
 
-    Retry-safe: a project that already exists with the same name is reused.
+    Each zip gets `nomad.json` (references) and `zenodo_harvest.json` (record
+    and checksums). Retry-safe: an existing project with the same name is reused.
     Once the demo project limit is reached, the remaining records are left
     out (reason `project_limit`) and handled by a later run.
     """
@@ -426,6 +522,12 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
     projects = _projects(harvest_config, data.user_id)
     content = json.loads(Path(data.work_list_path).read_text(encoding="utf-8"))
     records = {record["record_id"]: record for record in content["records"]}
+    manifest = Manifest.model_validate_json(
+        Path(data.manifest_path).read_text(encoding="utf-8")
+    )
+    results = Results.model_validate_json(
+        Path(data.results_path).read_text(encoding="utf-8")
+    )
     result = CreateProjectsResult(upload_ids={}, created=[], left_out={})
     for record_id, zip_path in sorted(data.zip_paths.items()):
         record = records.get(record_id)
@@ -445,6 +547,7 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
             else f"{harvest_config.zenodo_url.rstrip('/')}/records/{record_id}"
         )
         nomad_projects.add_project_metadata(zip_path, [reference])
+        nomad_projects.add_harvest_metadata(zip_path, record, manifest, results)
         name = nomad_projects.project_name(record["concept_record_id"], record_id)
         try:
             upload_id, created = nomad_projects.create_project(
@@ -468,7 +571,9 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
 
 @activity.defn
 def merge_state(data: MergeStateInput) -> MergeSummary:
-    """Merge Galaxy's manifest and results into the state (all or nothing)."""
+    """Merge Galaxy's manifest and results into the user's state (all or nothing),
+    then add the converted raw files to the checksum index."""
+    harvest_config = _harvest_config()
     try:
         manifest = Manifest.model_validate_json(
             Path(data.manifest_path).read_text(encoding="utf-8")
@@ -476,10 +581,14 @@ def merge_state(data: MergeStateInput) -> MergeSummary:
         results = Results.model_validate_json(
             Path(data.results_path).read_text(encoding="utf-8")
         )
-        with StateStore(_state_path()) as store:
+        with StateStore(_state_path(harvest_config, data.user_id)) as store:
             summary = merge_manifest(
                 store, manifest, results, data.upload_ids, data.left_out
             )
+        converted = checksum_index.converted_files(
+            manifest, results, data.upload_ids, data.user_id
+        )
+        _checksum_index(harvest_config).add(converted)
     except ValueError as error:  # includes pydantic's ValidationError
         # The same files would fail again, so do not retry.
         raise ApplicationError(
@@ -487,6 +596,12 @@ def merge_state(data: MergeStateInput) -> MergeSummary:
         ) from error
     activity.logger.info("State merged: %s", summary)
     return summary
+
+
+@activity.defn
+def finish_run(data: FinishRunInput) -> bool:
+    """Remove the run's mark as the user's active run (also after a failure)."""
+    return release_run(_user_dir(_harvest_config(), data.user_id), data.run_id)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -512,6 +627,7 @@ def write_report(data: WriteReportInput) -> WriteReportResult:
         ),
         results=Results.model_validate(results) if results else None,
         steps=data.steps,
+        duplicates=_read_json(run_dir / DUPLICATES_FILE),
     )
     report_path = run_dir / REPORT_FILE
     report_path.write_text(json.dumps(content, indent=2), encoding="utf-8")
@@ -536,10 +652,12 @@ def email_report(data: EmailReportInput) -> EmailReportResult:
 
     Also sent for a failed run; its subject then ends in "run failed".
 
-    Sends nothing when the worker has no HARVEST_SMTP_HOST (see `mailer`).
+    Sends nothing when NOMAD's `mail` config is not enabled (see `mailer`).
     """
+    from nomad.config import config  # noqa: PLC0415
+
     try:
-        settings = mailer.SmtpSettings.from_env(os.environ)
+        settings = mailer.SmtpSettings.from_mail_config(config.mail)
     except mailer.MailConfigError as error:
         raise ApplicationError(str(error), non_retryable=True) from error
     if settings is None:

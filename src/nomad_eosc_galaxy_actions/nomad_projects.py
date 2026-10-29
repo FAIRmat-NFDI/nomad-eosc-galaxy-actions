@@ -22,12 +22,15 @@ Framework-agnostic: no NOMAD or Temporal imports.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import zipfile
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import requests
+
+from nomad_eosc_galaxy_actions.manifest import Manifest, Results
 
 PROJECT_PREFIX = "zgn-demo-"
 # A constant on purpose: raising it needs a reviewed code change. Also NOMAD's
@@ -36,6 +39,10 @@ MAX_DEMO_PROJECTS = 10
 # Upload metadata file NOMAD reads from the project root
 # (https://docs.nomad-lab.eu/howto/manage/gui/upload.html).
 METADATA_FILE = "nomad.json"
+# The harvest's own record of each project: Zenodo record and file checksums.
+# NOMAD's project metadata has no field for it, so it is a file in the project.
+HARVEST_METADATA_FILE = "zenodo_harvest.json"
+HARVEST_METADATA_SCHEMA_VERSION = 1
 
 
 class ProjectLimitReached(RuntimeError):
@@ -65,12 +72,63 @@ def add_project_metadata(zip_path: str | Path, references: list[str]) -> None:
         ValueError: the zip already has another `nomad.json` (Galaxy must not
             add one).
     """
-    content = json.dumps({"references": references})
+    _add_file(zip_path, METADATA_FILE, {"references": references})
+
+
+def _add_file(zip_path: str | Path, name: str, content: dict[str, Any]) -> None:
+    """Add a JSON file to the zip's root; the same content again changes nothing."""
+    text = json.dumps(content)
     with zipfile.ZipFile(zip_path, "a") as archive:
-        if METADATA_FILE not in archive.namelist():
-            archive.writestr(METADATA_FILE, content)
-        elif archive.read(METADATA_FILE).decode() != content:
-            raise ValueError(f"{zip_path} already contains another {METADATA_FILE}")
+        if name not in archive.namelist():
+            archive.writestr(name, text)
+        elif archive.read(name).decode() != text:
+            raise ValueError(f"{zip_path} already contains another {name}")
+
+
+def add_harvest_metadata(
+    zip_path: str | Path, record: dict[str, Any], manifest: Manifest, results: Results
+) -> None:
+    """Add `zenodo_harvest.json`: the Zenodo record and, per converted raw file,
+    its path and SHA-256 and those of its NeXus file.
+
+    Raises:
+        ValueError: the zip already has another `zenodo_harvest.json`.
+    """
+    by_sha256 = {result.sha256: result for result in results.files}
+    files = []
+    with zipfile.ZipFile(zip_path) as archive:
+        members = set(archive.namelist())
+        for file in sorted(manifest.files, key=lambda f: f.path):
+            if (file.record_id, file.role, file.action) != (
+                record["record_id"],
+                "raw",
+                "process",
+            ):
+                continue
+            nexus_path = getattr(by_sha256.get(file.sha256), "nexus_path", None)
+            nexus_sha256 = (
+                hashlib.sha256(archive.read(nexus_path)).hexdigest()
+                if nexus_path in members
+                else None
+            )
+            files.append(
+                {
+                    "raw_path": file.path,
+                    "raw_sha256": file.sha256,
+                    "nexus_path": nexus_path if nexus_sha256 else None,
+                    "nexus_sha256": nexus_sha256,
+                }
+            )
+    zenodo = {
+        key: record.get(key)
+        for key in ("record_id", "concept_record_id", "version_doi", "concept_doi")
+    }
+    content = {
+        "schema_version": HARVEST_METADATA_SCHEMA_VERSION,
+        "zenodo": zenodo,
+        "files": files,
+    }
+    _add_file(zip_path, HARVEST_METADATA_FILE, content)
 
 
 def create_project(projects: Projects, name: str, zip_path: Path) -> tuple[str, bool]:

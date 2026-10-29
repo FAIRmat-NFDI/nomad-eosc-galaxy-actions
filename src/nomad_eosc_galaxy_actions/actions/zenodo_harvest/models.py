@@ -7,8 +7,10 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, field_serializer
 from pydantic.json_schema import SkipJsonSchema
+
+from nomad_eosc_galaxy_actions.credentials import reveal
 
 
 class ZenodoHarvestWorkflowInput(BaseModel):
@@ -48,15 +50,49 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         description="With repeat_every_days: stop after this many runs. Empty "
         "means until the Action is stopped.",
     )
+    allow_duplicate_projects: bool = Field(
+        False,
+        description="Also convert raw files that are already in one of your NOMAD "
+        "projects (same SHA-256 checksum). Off: such files are skipped and listed "
+        "as duplicate in the report.",
+    )
+    galaxy_api_key: SecretStr | None = Field(
+        None,
+        description="Your Galaxy API key (in Galaxy: User > Preferences > Manage "
+        "API Key). Empty uses the worker's GALAXY_API_KEY, if the administrators "
+        "set one.",
+    )
+    zenodo_token: SecretStr | None = Field(
+        None,
+        description="Optional Zenodo personal access token; allows larger search "
+        "pages. Empty uses the worker's ZENODO_TOKEN, if set.",
+    )
     # Set by the workflow when it continues as new; SkipJsonSchema keeps it
     # out of the JSON schema, so the form does not show it.
     run_number: SkipJsonSchema[int] = 1
+
+    @field_serializer("galaxy_api_key", "zenodo_token", when_used="json")
+    def _dump_secret(self, value: SecretStr | None) -> str | None:
+        return reveal(value)
+
+
+class GalaxyKeyInput(BaseModel):
+    """Base of activity inputs that call Galaxy with the user's API key."""
+
+    galaxy_api_key: SecretStr | None = Field(
+        None, description="From the form; empty uses the worker's GALAXY_API_KEY."
+    )
+
+    @field_serializer("galaxy_api_key", when_used="json")
+    def _dump_secret(self, value: SecretStr | None) -> str | None:
+        return reveal(value)
 
 
 class PrepareRunInput(BaseModel):
     """Input for the activity that sets up the run's artifacts folder."""
 
     action_instance_id: str
+    user_id: str = Field(..., description="Only one run per user at a time.")
     run_id: str = Field(
         ..., description="Unique per run; equals action_instance_id for one run."
     )
@@ -81,6 +117,13 @@ class SearchZenodoInput(BaseModel):
     """Input for the activity that searches Zenodo."""
 
     run_dir: str
+    zenodo_token: SecretStr | None = Field(
+        None, description="From the form; empty uses the worker's ZENODO_TOKEN."
+    )
+
+    @field_serializer("zenodo_token", when_used="json")
+    def _dump_secret(self, value: SecretStr | None) -> str | None:
+        return reveal(value)
 
 
 class SearchZenodoResult(BaseModel):
@@ -96,10 +139,12 @@ class BuildWorkListInput(BaseModel):
     """Input for the activity that compares the candidates with the state."""
 
     run_dir: str
+    user_id: str = Field(..., description="Whose state and projects to compare with.")
     run_id: str = Field(..., description="Written into the work list for Galaxy.")
     max_records: int | None = Field(
         None, description="Limit for records with work; empty means no limit."
     )
+    allow_duplicate_projects: bool = False
 
 
 class BuildWorkListResult(BaseModel):
@@ -112,7 +157,7 @@ class BuildWorkListResult(BaseModel):
     )
 
 
-class RunGalaxyInput(BaseModel):
+class RunGalaxyInput(GalaxyKeyInput):
     """Input for the activity that sends the work list to Galaxy."""
 
     work_list_path: str
@@ -124,7 +169,7 @@ class RunGalaxyResult(BaseModel):
     invocation_id: str
 
 
-class PollGalaxyInput(BaseModel):
+class PollGalaxyInput(GalaxyKeyInput):
     invocation_id: str
 
 
@@ -136,10 +181,11 @@ class PollGalaxyResult(BaseModel):
     )
 
 
-class FetchManifestInput(BaseModel):
+class FetchManifestInput(GalaxyKeyInput):
     """Input for the activity that downloads Galaxy's manifest and results."""
 
     run_dir: str
+    user_id: str = Field(..., description="Whose projects count for duplicates.")
     work_list_path: str = Field(
         ..., description="The work list sent to Galaxy, to check the manifest."
     )
@@ -159,7 +205,7 @@ class FetchManifestResult(BaseModel):
     )
 
 
-class FetchProjectsInput(BaseModel):
+class FetchProjectsInput(GalaxyKeyInput):
     """Input for the activity that downloads the project zips from Galaxy."""
 
     run_dir: str
@@ -176,6 +222,8 @@ class CreateProjectsInput(BaseModel):
     """Input for the activity that creates one NOMAD project per zip."""
 
     work_list_path: str
+    manifest_path: str = Field(..., description="For the checksums of each project.")
+    results_path: str
     user_id: str = Field(
         ..., description="Owner of the projects when no nomad_url is configured."
     )
@@ -195,6 +243,7 @@ class MergeStateInput(BaseModel):
 
     manifest_path: str
     results_path: str
+    user_id: str = Field(..., description="Whose state is updated.")
     upload_ids: dict[str, str] = Field(
         default_factory=dict, description="Record ID → NOMAD upload ID."
     )
@@ -202,6 +251,13 @@ class MergeStateInput(BaseModel):
         default_factory=list,
         description="Record IDs not merged (no project), so the next run retries them.",
     )
+
+
+class FinishRunInput(BaseModel):
+    """Input for the activity that ends the user's active run."""
+
+    user_id: str
+    run_id: str
 
 
 class WriteReportInput(BaseModel):

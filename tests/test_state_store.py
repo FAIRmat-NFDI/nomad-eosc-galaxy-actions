@@ -3,16 +3,21 @@
 # This file is part of nomad-eosc-galaxy-actions.
 #
 # SPDX-License-Identifier: Apache-2.0
-import sqlite3
-import threading
+import json
+import multiprocessing
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from nomad_eosc_galaxy_actions.state_store import (
+    ACTIVE_RUN_FILE,
     STATE_SCHEMA_VERSION,
     NoTransactionError,
+    RunLockedError,
     StateSchemaError,
     StateStore,
+    acquire_run,
+    release_run,
 )
 
 CID = "5907155"
@@ -20,87 +25,80 @@ CID = "5907155"
 
 @pytest.fixture
 def store(tmp_path):
-    with StateStore(tmp_path / "state" / "state.sqlite") as store:
+    with StateStore(tmp_path / "state" / "state.json") as store:
         yield store
 
 
-def test_new_file_gets_tables_and_version(tmp_path):
-    path = tmp_path / "a" / "state.sqlite"  # parent folder is created
+def _files(store) -> dict:
+    return store.snapshot()["files"][CID]
+
+
+def test_missing_file_is_an_empty_state(tmp_path):
+    path = tmp_path / "a" / "state.json"
     with StateStore(path) as store:
         assert store.schema_version == STATE_SCHEMA_VERSION
         assert store.known_sha256(CID) == []
-    with StateStore(path) as store:  # reopening keeps the file as is
-        assert store.schema_version == STATE_SCHEMA_VERSION
+    assert not path.exists()  # reading never writes
+
+
+def test_transaction_writes_the_file(tmp_path):
+    path = tmp_path / "a" / "state.json"  # parent folder is created
+    with StateStore(path) as store, store.transaction():
+        store.record_loose_md5(CID, "md5-a", "sha-a")
+
+    content = json.loads(path.read_text())
+    assert content["schema_version"] == STATE_SCHEMA_VERSION
+    assert content["loose_md5"] == {CID: {"md5-a": "sha-a"}}
+    assert sorted(p.name for p in path.parent.iterdir()) == [
+        "state.json",
+        "state.json.lock",
+    ]
+    with StateStore(path) as store:  # reopening reads it back
+        assert store.is_loose_md5_known(CID, "md5-a")
+
+
+def _write(path, content: dict) -> None:
+    path.write_text(json.dumps(content))
+
+
+@pytest.mark.parametrize("version", [None, 0, "1"])
+def test_bad_schema_version_is_refused(tmp_path, version):
+    path = tmp_path / "state.json"
+    _write(path, {"schema_version": version})
+
+    with pytest.raises(StateSchemaError, match="bad schema_version"):
+        StateStore(path)
 
 
 def test_newer_schema_version_is_refused(tmp_path):
-    path = tmp_path / "state.sqlite"
-    with sqlite3.connect(path) as db:
-        db.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION + 1}")
-    db.close()
+    path = tmp_path / "state.json"
+    _write(path, {"schema_version": STATE_SCHEMA_VERSION + 1})
 
     with pytest.raises(StateSchemaError, match="newer than supported"):
         StateStore(path)
 
 
-def _file_at_version(path, version: int, sql: str = "") -> None:
-    db = sqlite3.connect(path)
-    db.executescript(f"{sql}; PRAGMA user_version = {version};")
-    db.close()
+# Fake upgrade steps for an imagined version 3: v1 -> v2 and v2 -> v3 each add a key.
+FAKE_UPGRADES = {1: lambda s: s | {"a": 1}, 2: lambda s: s | {"b": 2}}
 
 
-def test_upgrade_runs_each_step(tmp_path):
-    # Example: version 3 is current; v1 -> v2 and v2 -> v3 each add a table.
-    path = tmp_path / "state.sqlite"
-    _file_at_version(path, 1, "CREATE TABLE files (x TEXT)")
-    upgrades = {1: "CREATE TABLE a (y TEXT)", 2: "CREATE TABLE b (z TEXT)"}
+def test_upgrade_runs_each_step_in_memory(tmp_path):
+    path = tmp_path / "state.json"
+    _write(path, {"schema_version": 1, "files": {}, "loose_md5": {}, "archives": {}})
+    before = path.read_bytes()
 
-    with StateStore(path, schema_version=3, upgrades=upgrades) as store:
+    with StateStore(path, schema_version=3, upgrades=FAKE_UPGRADES) as store:
         assert store.schema_version == 3  # noqa: PLR2004
-        tables = store._db.execute("SELECT name FROM sqlite_master").fetchall()
-    assert sorted(name for (name,) in tables) == ["a", "b", "files"]
-
-
-def test_failed_upgrade_keeps_old_version(tmp_path):
-    path = tmp_path / "state.sqlite"
-    _file_at_version(path, 1, "CREATE TABLE files (x TEXT)")
-
-    with pytest.raises(sqlite3.OperationalError):
-        StateStore(path, schema_version=2, upgrades={1: "CREATE TABLE files (x)"})
-    with StateStore(path, schema_version=1) as store:
-        assert store.schema_version == 1
+        assert (store.snapshot()["a"], store.snapshot()["b"]) == (1, 2)
+    assert path.read_bytes() == before  # saved only with the next transaction
 
 
 def test_missing_upgrade_step_is_refused(tmp_path):
-    path = tmp_path / "state.sqlite"
-    _file_at_version(path, 1, "CREATE TABLE files (x TEXT)")
+    path = tmp_path / "state.json"
+    _write(path, {"schema_version": 1})
 
     with pytest.raises(StateSchemaError, match="no upgrade from state schema 1"):
         StateStore(path, schema_version=2, upgrades={})
-
-
-# Layout of schema version 1, before files got `archive_md5`.
-_V1_FILES = """CREATE TABLE files (concept_record_id TEXT NOT NULL,
-    sha256 TEXT NOT NULL, status TEXT NOT NULL, path TEXT, version_doi TEXT,
-    tool_version TEXT, upload_id TEXT, error TEXT, updated_at TEXT NOT NULL,
-    PRIMARY KEY (concept_record_id, sha256));
-INSERT INTO files VALUES ('c', 'sha-a', 'success', 'a.sxm', NULL, '0.1',
-    NULL, NULL, 'then')"""
-
-
-def test_version_1_file_is_upgraded(tmp_path):
-    path = tmp_path / "state.sqlite"
-    _file_at_version(path, 1, _V1_FILES)
-
-    with StateStore(path) as store:
-        assert store.schema_version == STATE_SCHEMA_VERSION
-        assert store.known_sha256("c") == ["sha-a"]  # rows are kept
-        with store.transaction():
-            store.record_file("c", "sha-b", status="failed", archive_md5="zip")
-        row = store._db.execute(
-            "SELECT archive_md5 FROM files WHERE sha256 = 'sha-b'"
-        ).fetchone()
-    assert row == ("zip",)
 
 
 def test_writes_need_a_transaction(store):
@@ -114,14 +112,20 @@ def test_transactions_cannot_be_nested(store):
             pass
 
 
-def test_failed_transaction_saves_nothing(store):
+def test_failed_transaction_saves_nothing(store, tmp_path):
+    with store.transaction():
+        store.record_file(CID, "sha-a", status="failed")
+    before = (tmp_path / "state" / "state.json").read_bytes()
+
     with pytest.raises(RuntimeError), store.transaction():
         store.set_archive_resolved(CID, "md5", True)
         store.record_file(CID, "sha-a", status="success")
         raise RuntimeError("merge interrupted")
 
     assert not store.is_archive_resolved(CID, "md5")
-    assert store.known_sha256(CID) == []
+    assert _files(store)["sha-a"]["status"] == "failed"
+    assert (tmp_path / "state" / "state.json").read_bytes() == before
+    assert not list((tmp_path / "state").glob("*.tmp"))
 
 
 def test_known_sha256_only_final_statuses(store):
@@ -140,10 +144,8 @@ def test_record_file_keeps_first_version_doi(store):
         store.record_file(CID, "sha-a", status="failed", version_doi="doi/v1")
         store.record_file(CID, "sha-a", status="success", version_doi="doi/v2")
 
-    row = store._db.execute(
-        "SELECT status, version_doi FROM files WHERE sha256 = 'sha-a'"
-    ).fetchone()
-    assert row == ("success", "doi/v1")
+    file = _files(store)["sha-a"]
+    assert (file["status"], file["version_doi"]) == ("success", "doi/v1")
 
 
 def test_loose_md5(store):
@@ -165,22 +167,28 @@ def test_archive_resolved_flag(store):
     assert store.is_archive_resolved(CID, "md5")
 
 
-def test_two_connections_see_committed_writes(tmp_path):
-    # Two runs in parallel (e.g. a manual run during a scheduled one).
-    path = tmp_path / "state.sqlite"
-    with StateStore(path) as writer, writer.transaction():
-        writer.record_loose_md5(CID, "md5-a", "sha-a")
+def _record_in_process(path, sha256: str) -> None:
+    with StateStore(path) as store, store.transaction():
+        store.record_file(CID, sha256, status="success")
 
-    seen = []
 
-    def read():
-        with StateStore(path) as reader:
-            seen.append(reader.is_loose_md5_known(CID, "md5-a"))
+def test_parallel_writers_keep_each_others_changes(tmp_path):
+    # Two worker processes merge into the same state; the lock serializes them.
+    path = tmp_path / "state.json"
+    with StateStore(path) as stale:  # opened before the others write
+        workers = [
+            multiprocessing.Process(target=_record_in_process, args=(path, f"sha-{i}"))
+            for i in range(4)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        with stale.transaction():  # starts from the file, not from its old copy
+            stale.record_file(CID, "sha-x", status="failed")
 
-    thread = threading.Thread(target=read)
-    thread.start()
-    thread.join()
-    assert seen == [True]
+    with StateStore(path) as store:
+        assert store.known_sha256(CID) == ["sha-0", "sha-1", "sha-2", "sha-3", "sha-x"]
 
 
 def test_retry_failed_reopens_archive_and_loose_file(store):
@@ -216,3 +224,38 @@ def test_retry_failed_same_version_changes_nothing(store):
 def test_retry_failed_needs_a_transaction(store):
     with pytest.raises(NoTransactionError):
         store.retry_failed("0.1")
+
+
+# One run per user at a time
+
+T0 = datetime(2026, 10, 28, 8, tzinfo=timezone.utc)
+DAY = timedelta(days=1)
+
+
+def test_second_run_of_a_user_is_refused(tmp_path):
+    acquire_run(tmp_path, "run-1", now=T0, max_age=DAY)
+
+    with pytest.raises(RunLockedError, match="run-1, started 2026-10-28T08:00"):
+        acquire_run(tmp_path, "run-2", now=T0 + DAY / 2, max_age=DAY)
+
+
+def test_acquire_again_is_fine_for_a_retry(tmp_path):
+    acquire_run(tmp_path, "run-1", now=T0, max_age=DAY)
+    acquire_run(tmp_path, "run-1", now=T0, max_age=DAY)
+
+
+def test_stale_mark_is_taken_over(tmp_path):
+    acquire_run(tmp_path, "run-1", now=T0, max_age=DAY)
+
+    acquire_run(tmp_path, "run-2", now=T0 + DAY, max_age=DAY)
+
+    assert json.loads((tmp_path / ACTIVE_RUN_FILE).read_text())["run_id"] == "run-2"
+
+
+def test_release_keeps_another_runs_mark(tmp_path):
+    assert release_run(tmp_path, "run-1") is False  # nothing to release
+    acquire_run(tmp_path, "run-1", now=T0, max_age=DAY)
+
+    assert release_run(tmp_path, "run-2") is False
+    assert release_run(tmp_path, "run-1") is True
+    acquire_run(tmp_path, "run-2", now=T0, max_age=DAY)  # free again

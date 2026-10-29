@@ -63,6 +63,8 @@ def parse_record(hit: dict[str, Any]) -> ZenodoRecord:
     metadata = hit.get("metadata", {})
     files = []
     for file in hit.get("files", []):
+        # Zenodo's checksum is the MD5 of the file content only ("md5:<hex>");
+        # the file name or path is not part of it, so a renamed copy matches.
         checksum = file.get("checksum") or ""
         md5 = checksum.removeprefix("md5:") if checksum.startswith("md5:") else None
         files.append(ZenodoFile(key=file["key"], size=file["size"], md5=md5))

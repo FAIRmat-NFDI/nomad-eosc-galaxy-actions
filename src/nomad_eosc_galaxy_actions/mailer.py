@@ -5,14 +5,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Send an email over SMTP (https://docs.python.org/3/library/smtplib.html).
 
-The SMTP settings come only from the worker's environment, so the password
-never appears in a config file, a run folder or the Action's inputs:
-
-- `HARVEST_SMTP_HOST`: SMTP server; without it no email is sent.
-- `HARVEST_SMTP_PORT`: default 587. Port 465 uses TLS from the start,
-  other ports switch to TLS (STARTTLS) when the server offers it.
-- `HARVEST_SMTP_FROM`: sender address (required with a host).
-- `HARVEST_SMTP_USER`, `HARVEST_SMTP_PASSWORD`: login, only over TLS.
+The SMTP server is NOMAD's own: the `mail` section of `nomad.yaml`
+(https://docs.nomad-lab.eu/reference/config.html#mail), set by the
+administrators for the whole installation. Port 465 uses TLS from the start,
+other ports switch to TLS (STARTTLS) when the server offers it. The login is
+only sent over TLS.
 
 Framework-agnostic: no NOMAD or Temporal imports.
 """
@@ -21,9 +18,10 @@ from __future__ import annotations
 
 import smtplib
 import ssl
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel, SecretStr
 
@@ -34,6 +32,18 @@ class MailConfigError(ValueError):
     """The SMTP settings are incomplete or unsafe."""
 
 
+class MailConfig(Protocol):
+    """The fields of NOMAD's `mail` config that are used here."""
+
+    enabled: bool
+    with_login: bool
+    host: str
+    port: int
+    user: str
+    password: SecretStr
+    from_address: str
+
+
 class SmtpSettings(BaseModel):
     host: str
     port: int = 587
@@ -42,30 +52,26 @@ class SmtpSettings(BaseModel):
     password: SecretStr | None = None  # never shown in logs or errors
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str]) -> SmtpSettings | None:
-        """Settings from `HARVEST_SMTP_*` variables, or None without a host.
+    def from_mail_config(cls, mail: MailConfig) -> SmtpSettings | None:
+        """Settings from NOMAD's `mail` config, or None when mail is disabled.
 
         Raises:
-            MailConfigError: a host without sender, or only half a login.
+            MailConfigError: mail is enabled without a host or sender, or the
+                login lacks a user or password.
         """
-        host = environ.get("HARVEST_SMTP_HOST")
-        if not host:
+        if not mail.enabled:
             return None
-        sender = environ.get("HARVEST_SMTP_FROM")
-        user = environ.get("HARVEST_SMTP_USER") or None
-        password = environ.get("HARVEST_SMTP_PASSWORD") or None
-        if not sender:
-            raise MailConfigError("HARVEST_SMTP_FROM is needed with HARVEST_SMTP_HOST")
-        if bool(user) != bool(password):
-            raise MailConfigError(
-                "set both HARVEST_SMTP_USER and HARVEST_SMTP_PASSWORD, or neither"
-            )
+        if not mail.host or not mail.from_address:
+            raise MailConfigError("mail.enabled needs mail.host and mail.from_address")
+        password = mail.password.get_secret_value() if mail.password else ""
+        if mail.with_login and not (mail.user and password):
+            raise MailConfigError("mail.with_login needs mail.user and mail.password")
         return cls(
-            host=host,
-            port=int(environ.get("HARVEST_SMTP_PORT") or 587),
-            sender=sender,
-            user=user,
-            password=password,
+            host=mail.host,
+            port=mail.port,
+            sender=mail.from_address,
+            user=mail.user if mail.with_login else None,
+            password=password if mail.with_login else None,
         )
 
 

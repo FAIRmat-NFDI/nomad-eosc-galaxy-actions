@@ -7,6 +7,7 @@ import email
 import socket
 
 import pytest
+from nomad.config.models.config import Mail
 
 from nomad_eosc_galaxy_actions.mailer import (
     MailConfigError,
@@ -15,47 +16,51 @@ from nomad_eosc_galaxy_actions.mailer import (
     send_mail,
 )
 
-ENV = {"HARVEST_SMTP_HOST": "smtp.example.org", "HARVEST_SMTP_FROM": "bot@example.org"}
+# NOMAD's own `mail` config model, as read from nomad.yaml.
+MAIL = {"enabled": True, "host": "smtp.example.org", "from_address": "bot@example.org"}
 
 
-# SmtpSettings.from_env
+# SmtpSettings.from_mail_config
 
 
-def test_no_host_means_no_email():
-    assert SmtpSettings.from_env({}) is None
-    assert SmtpSettings.from_env({"HARVEST_SMTP_HOST": ""}) is None
+def test_disabled_mail_means_no_email():
+    assert SmtpSettings.from_mail_config(Mail()) is None
+    assert SmtpSettings.from_mail_config(Mail(**MAIL | {"enabled": False})) is None
 
 
-def test_settings_from_env():
-    settings = SmtpSettings.from_env(
-        ENV
-        | {
-            "HARVEST_SMTP_PORT": "465",
-            "HARVEST_SMTP_USER": "bot",
-            "HARVEST_SMTP_PASSWORD": "secret",
-        }
-    )
+def test_settings_from_mail_config():
+    login = {"port": 465, "with_login": True, "user": "bot", "password": "secret"}
+    settings = SmtpSettings.from_mail_config(Mail(**MAIL | login))
 
-    assert (settings.host, settings.port, settings.user) == (
+    assert (settings.host, settings.port, settings.user, settings.sender) == (
         "smtp.example.org",
         465,
         "bot",
+        "bot@example.org",
     )
+    assert settings.password.get_secret_value() == "secret"
     assert "secret" not in repr(settings)  # kept out of logs and errors
-    assert SmtpSettings.from_env(ENV).port == 587  # noqa: PLR2004
+
+
+def test_login_is_only_used_with_with_login():
+    mail = Mail(**MAIL | {"user": "bot", "password": "secret"})
+    settings = SmtpSettings.from_mail_config(mail)
+
+    assert (settings.user, settings.password) == (None, None)
 
 
 @pytest.mark.parametrize(
-    "env, message",
+    "change, message",
     [
-        ({"HARVEST_SMTP_HOST": "smtp.example.org"}, "HARVEST_SMTP_FROM"),
-        (ENV | {"HARVEST_SMTP_USER": "bot"}, "both"),
-        (ENV | {"HARVEST_SMTP_PASSWORD": "secret"}, "both"),
+        ({"host": ""}, "mail.host"),
+        ({"from_address": ""}, "mail.from_address"),
+        ({"with_login": True, "user": "bot"}, "mail.password"),
+        ({"with_login": True, "password": "secret"}, "mail.user"),
     ],
 )
-def test_incomplete_settings_are_refused(env, message):
+def test_incomplete_settings_are_refused(change, message):
     with pytest.raises(MailConfigError, match=message):
-        SmtpSettings.from_env(env)
+        SmtpSettings.from_mail_config(Mail(**MAIL | change))
 
 
 # send_mail (against a local fake SMTP server)

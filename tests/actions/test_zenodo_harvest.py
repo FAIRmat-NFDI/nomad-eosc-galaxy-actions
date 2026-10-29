@@ -3,6 +3,7 @@
 # This file is part of nomad-eosc-galaxy-actions.
 #
 # SPDX-License-Identifier: Apache-2.0
+import hashlib
 import io
 import json
 import uuid
@@ -12,8 +13,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from nomad.config.models.config import Mail
 from pydantic import ValidationError
 from temporalio.client import WorkflowFailureError
+from temporalio.contrib.pydantic import PydanticPayloadConverter
+from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import Worker
@@ -22,6 +26,8 @@ from nomad_eosc_galaxy_actions import zenodo_client
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     CANDIDATES_FILE,
     CANDIDATES_SCHEMA_VERSION,
+    DUPLICATES_FILE,
+    DUPLICATES_SCHEMA_VERSION,
     MANIFEST_FILE,
     PROJECTS_DIR,
     REPORT_FILE,
@@ -31,6 +37,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     RUN_CONFIG_SCHEMA_VERSION,
     SKIPPED_FILES_FILE,
     SKIPPED_FILES_SCHEMA_VERSION,
+    STATE_DIR,
     STATE_FILE,
     WORK_LIST_FILE,
     ZENODO_HARVEST_ACTION,
@@ -39,6 +46,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     email_report,
     fetch_manifest,
     fetch_projects,
+    finish_run,
     merge_state,
     poll_galaxy,
     prepare_run,
@@ -58,6 +66,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     EmailReportInput,
     FetchManifestInput,
     FetchProjectsInput,
+    FinishRunInput,
     MergeStateInput,
     PollGalaxyInput,
     PrepareRunInput,
@@ -70,12 +79,19 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
     ZenodoHarvestWorkflow,
 )
 from nomad_eosc_galaxy_actions.report import REPORT_SCHEMA_VERSION
+from nomad_eosc_galaxy_actions.state_store import ACTIVE_RUN_FILE
 from nomad_eosc_galaxy_actions.work_list import WORK_LIST_SCHEMA_VERSION
+
+
+def _state(actions_fs: Path, user_id: str = "u1") -> Path:
+    """The user's state file in the default state folder."""
+    return actions_fs / "artifacts" / STATE_DIR / "users" / user_id / STATE_FILE
 
 
 def _prepare_input(**overrides) -> PrepareRunInput:
     values = {
         "action_instance_id": "run-1",
+        "user_id": "u1",
         "run_id": "run-1",
         "started_at": "2026-10-15T12:00:00+00:00",
         "dry_run": True,
@@ -124,11 +140,62 @@ def test_workflow_input_defaults_to_dry_run():
     assert ZenodoHarvestWorkflowInput(user_id="u1").dry_run is True
 
 
+def test_secrets_are_hidden_in_the_form_and_the_model():
+    schema = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
+    for name in ("galaxy_api_key", "zenodo_token"):
+        assert schema[name]["anyOf"][0] == {
+            "format": "password",
+            "type": "string",
+            "writeOnly": True,
+        }
+    data = ZenodoHarvestWorkflowInput(user_id="u1", galaxy_api_key="k")
+    assert "'k'" not in repr(data)
+    # Temporal sends the input as JSON, so the activity gets the real value.
+    assert json.loads(data.model_dump_json())["galaxy_api_key"] == "k"
+
+
 def test_run_number_is_not_in_the_form():
     schema = ZenodoHarvestWorkflowInput.model_json_schema()
 
     assert "run_number" not in schema["properties"]
     assert {"repeat_every_days", "max_runs"} <= schema["properties"].keys()
+
+
+def _prepare(**overrides):
+    return ActivityEnvironment().run(prepare_run, _prepare_input(**overrides))
+
+
+def test_prepare_run_refuses_a_second_run_of_the_user(actions_fs, harvest_config_file):
+    _prepare(run_id="run-1")
+    _prepare(run_id="run-1")  # a retry of the same run is fine
+    _prepare(user_id="u2", run_id="run-2")  # other users run in parallel
+
+    with pytest.raises(ApplicationError, match="run-1, started") as error:
+        _prepare(run_id="run-3")
+    assert error.value.non_retryable
+
+    assert ActivityEnvironment().run(
+        finish_run, FinishRunInput(user_id="u1", run_id="run-1")
+    )
+    _prepare(run_id="run-3")  # free again
+
+
+def test_prepare_run_refuses_an_unsafe_user_id(actions_fs, harvest_config_file):
+    with pytest.raises(ApplicationError, match="unexpected user ID") as error:
+        _prepare(user_id="../u1")
+    assert error.value.non_retryable
+    assert not (actions_fs / "artifacts" / STATE_DIR).exists()
+
+
+def test_state_dir_from_the_harvest_config(tmp_path, actions_fs, harvest_config_file):
+    state_dir = tmp_path / "volume"
+    content = json.loads(harvest_config_file.read_text())
+    harvest_config_file.write_text(json.dumps(content | {"state_dir": str(state_dir)}))
+
+    _prepare()
+
+    assert (state_dir / "users" / "u1" / ACTIVE_RUN_FILE).is_file()
+    assert not (actions_fs / "artifacts" / STATE_DIR).exists()
 
 
 def test_write_candidates(tmp_path):
@@ -173,8 +240,7 @@ def harvest_config_file(tmp_path, fake_zenodo, monkeypatch):
     entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
     monkeypatch.setattr(entry_point, "harvest_config_path", str(path))
     monkeypatch.delenv("ZENODO_TOKEN", raising=False)
-    for name in ("HOST", "PORT", "FROM", "USER", "PASSWORD"):
-        monkeypatch.delenv(f"HARVEST_SMTP_{name}", raising=False)
+    monkeypatch.setattr(config, "mail", Mail())  # no email unless a test enables it
     return path
 
 
@@ -198,6 +264,10 @@ def nomad_config(harvest_config_file, galaxy_config, fake_nomad, monkeypatch):
     return fake_nomad
 
 
+# NOMAD's own payload converter (nomad/actions/client.py): inputs are sent
+# as JSON like in production, secrets included.
+NOMAD_CONVERTER = DataConverter(payload_converter_class=PydanticPayloadConverter)
+
 ALL_ACTIVITIES = [
     prepare_run,
     search_zenodo,
@@ -210,6 +280,7 @@ ALL_ACTIVITIES = [
     merge_state,
     write_report,
     email_report,
+    finish_run,
 ]
 
 
@@ -219,7 +290,9 @@ async def _run_workflow(
     # Time-skipping test server: a local Temporal test server (downloaded on
     # first use) that fast-forwards timers such as the Galaxy polling sleep.
     task_queue = f"test-{uuid.uuid4()}"
-    async with await WorkflowEnvironment.start_time_skipping() as env:
+    async with await WorkflowEnvironment.start_time_skipping(
+        data_converter=NOMAD_CONVERTER
+    ) as env:
         async with Worker(
             env.client,
             task_queue=task_queue,
@@ -286,6 +359,7 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     assert [r["record_id"] for r in report["records"]] == ["10843653", "10443995"]
     assert "too_large" in (run_dir / REPORT_MARKDOWN_FILE).read_text()
     assert result["email"] == {"status": "skipped", "reason": "smtp_not_configured"}
+    assert not list(actions_fs.rglob(ACTIVE_RUN_FILE))  # the user can run again
 
 
 def _search(run_dir) -> None:
@@ -298,7 +372,8 @@ def test_build_work_list_activity(tmp_path, actions_fs, harvest_config_file):
     _search(run_dir)
 
     result = ActivityEnvironment().run(
-        build_work_list, BuildWorkListInput(run_dir=str(run_dir), run_id="run-1")
+        build_work_list,
+        BuildWorkListInput(run_dir=str(run_dir), user_id="u1", run_id="run-1"),
     )
 
     assert (result.records, result.skipped) == (6, 1)
@@ -307,7 +382,7 @@ def test_build_work_list_activity(tmp_path, actions_fs, harvest_config_file):
     assert sum(len(r["download"]) for r in work_list["records"]) == result.files
     skipped = json.loads((run_dir / SKIPPED_FILES_FILE).read_text())
     assert skipped["skipped"][0]["reason"] == "too_large"
-    assert (actions_fs / "artifacts" / STATE_FILE).is_file()  # created on first use
+    assert not _state(actions_fs).exists()  # planning only reads the state
 
 
 def test_build_work_list_activity_skips_resolved_records(
@@ -316,7 +391,7 @@ def test_build_work_list_activity_skips_resolved_records(
     from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
 
     with (
-        StateStore(actions_fs / "artifacts" / STATE_FILE) as store,
+        StateStore(_state(actions_fs)) as store,
         store.transaction(),
     ):
         # Record 17312296 has a single archive, Data_v2.zip.
@@ -326,7 +401,8 @@ def test_build_work_list_activity_skips_resolved_records(
     _search(run_dir)
 
     result = ActivityEnvironment().run(
-        build_work_list, BuildWorkListInput(run_dir=str(run_dir), run_id="run-2")
+        build_work_list,
+        BuildWorkListInput(run_dir=str(run_dir), user_id="u1", run_id="run-2"),
     )
 
     work_list = json.loads(Path(result.work_list_path).read_text())
@@ -362,10 +438,25 @@ def test_galaxy_needs_api_key(tmp_path, galaxy_config, monkeypatch):
     monkeypatch.delenv("GALAXY_API_KEY")
     path = _work_list(tmp_path)
 
-    with pytest.raises(ValueError, match="GALAXY_API_KEY"):
+    with pytest.raises(ApplicationError, match="GALAXY_API_KEY") as error:
         ActivityEnvironment().run(
             run_galaxy, RunGalaxyInput(work_list_path=str(path), run_id="run-1")
         )
+    assert error.value.non_retryable
+    assert galaxy_config.requests == []
+
+
+def test_galaxy_key_from_the_form_wins(tmp_path, galaxy_config):
+    path = _work_list(tmp_path)
+
+    ActivityEnvironment().run(
+        run_galaxy,
+        RunGalaxyInput(
+            work_list_path=str(path), run_id="run-1", galaxy_api_key="form-key"
+        ),
+    )
+
+    assert galaxy_config.api_keys == {"form-key"}
 
 
 @pytest.mark.parametrize(
@@ -393,6 +484,7 @@ def _fetch(run_dir: Path, results_dataset_id: str | None = None):
         fetch_manifest,
         FetchManifestInput(
             run_dir=str(run_dir),
+            user_id="u1",
             work_list_path=str(run_dir / WORK_LIST_FILE),
             manifest_dataset_id="out-1",
             results_dataset_id=results_dataset_id,
@@ -487,7 +579,7 @@ def _galaxy_outputs(run_id: str) -> tuple[bytes, bytes]:
     results = {
         "schema_version": 1,
         "run_id": run_id,
-        "files": [{"sha256": "sha-a", "status": "success"}],
+        "files": [{"sha256": "sha-a", "status": "success", "nexus_path": "a/a.nxs"}],
     }
     return json.dumps(manifest).encode(), json.dumps(results).encode()
 
@@ -548,8 +640,34 @@ def _project_inputs(tmp_path, *record_ids: str) -> CreateProjectsInput:
         path = tmp_path / f"{record_id}.zip"
         path.write_bytes(_project_zip())
         zip_paths[record_id] = str(path)
+    raw_files = [
+        {
+            "concept_record_id": "100",
+            "record_id": record_id,
+            "source": "loose",
+            "path": "a.sxm",
+            "size": 3,
+            "sha256": f"sha-{record_id}",
+            "role": "raw",
+            "action": "process",
+        }
+        for record_id in record_ids
+    ]
+    manifest = {"schema_version": 1, "run_id": "run-1", "tool_version": "0.1"}
+    (tmp_path / MANIFEST_FILE).write_text(json.dumps(manifest | {"files": raw_files}))
+    results = [
+        {"sha256": f"sha-{r}", "status": "success", "nexus_path": "a/a.nxs"}
+        for r in record_ids
+    ]
+    (tmp_path / RESULTS_FILE).write_text(
+        json.dumps({"schema_version": 1, "run_id": "run-1", "files": results})
+    )
     return CreateProjectsInput(
-        work_list_path=str(work_list), user_id="u1", zip_paths=zip_paths
+        work_list_path=str(work_list),
+        manifest_path=str(tmp_path / MANIFEST_FILE),
+        results_path=str(tmp_path / RESULTS_FILE),
+        user_id="u1",
+        zip_paths=zip_paths,
     )
 
 
@@ -617,11 +735,12 @@ def test_merge_state_activity(tmp_path, actions_fs):
         MergeStateInput(
             manifest_path=str(tmp_path / MANIFEST_FILE),
             results_path=str(tmp_path / RESULTS_FILE),
+            user_id="u1",
         ),
     )
 
     assert (summary.success, summary.archives_resolved) == (1, 1)
-    with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+    with StateStore(_state(actions_fs)) as store:
         assert store.known_sha256(CID) == ["sha-a"]
         assert store.is_archive_resolved(CID, "zip-md5")
 
@@ -643,6 +762,7 @@ def test_merge_state_rejects_bad_outputs(tmp_path, actions_fs, results):
             MergeStateInput(
                 manifest_path=str(tmp_path / MANIFEST_FILE),
                 results_path=str(tmp_path / RESULTS_FILE),
+                user_id="u1",
             ),
         )
     assert error.value.non_retryable
@@ -709,9 +829,18 @@ async def test_workflow_creates_projects_and_merges(
         assert json.loads(archive.read("nomad.json"))["references"] == [
             "https://doi.org/10.5061/dryad.1g1jwsv49"
         ]
-    with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
-        row = store._db.execute("SELECT upload_id FROM files").fetchone()
-    assert row == ("up-1",)
+        harvest = json.loads(archive.read("zenodo_harvest.json"))
+    assert harvest["zenodo"]["record_id"] == RECORD
+    assert harvest["files"] == [
+        {
+            "raw_path": "d/a.sxm",
+            "raw_sha256": "sha-a",
+            "nexus_path": "a/a.nxs",
+            "nexus_sha256": hashlib.sha256(b"nexus").hexdigest(),
+        }
+    ]
+    with StateStore(_state(actions_fs)) as store:
+        assert store.snapshot()["files"][CID]["sha-a"]["upload_id"] == "up-1"
     report = json.loads(Path(result["report_path"]).read_text())
     assert report["records"][0]["upload_id"] == "up-1"
     assert report["failed_files"] == []
@@ -734,13 +863,102 @@ async def test_every_written_file_has_its_schema_version(
         CANDIDATES_FILE: CANDIDATES_SCHEMA_VERSION,
         WORK_LIST_FILE: WORK_LIST_SCHEMA_VERSION,
         SKIPPED_FILES_FILE: SKIPPED_FILES_SCHEMA_VERSION,
+        DUPLICATES_FILE: DUPLICATES_SCHEMA_VERSION,
         REPORT_FILE: REPORT_SCHEMA_VERSION,
     }
     for name, version in versions.items():
         content = json.loads((run_dir / name).read_text())
         assert content["schema_version"] == version, name
-    with state_store.StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+    with state_store.StateStore(_state(actions_fs)) as store:
         assert store.schema_version == state_store.STATE_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_secrets_from_the_form_are_never_written(
+    actions_fs, nomad_config, fake_galaxy, fake_zenodo, caplog
+):
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+    _real_galaxy(fake_galaxy, workflow_id)
+    secrets = {"galaxy_api_key": "form-key-123", "zenodo_token": "form-token-456"}
+
+    with caplog.at_level("DEBUG"):
+        result = await _run_workflow(workflow_id, dry_run=False, **secrets)
+
+    assert result["nomad"]["created"] == [RECORD]
+    assert fake_galaxy.api_keys == {"form-key-123"}  # not the worker's test-key
+    assert set(fake_zenodo.auth_headers) == {"Bearer form-token-456"}
+    sent_to_galaxy = (
+        json.dumps(
+            [fake_galaxy.history_payload, fake_galaxy.invocation_payload]
+        ).encode()
+        + fake_galaxy.uploaded
+    )
+    written = [p.read_bytes() for p in actions_fs.rglob("*") if p.is_file()]
+    for secret in secrets.values():
+        assert secret.encode() not in sent_to_galaxy
+        assert not any(secret.encode() in content for content in written)
+        assert secret not in caplog.text
+        assert secret not in json.dumps(result)
+
+
+def _known_again(galaxy, workflow_id: str) -> None:
+    """Galaxy's outputs of a later run, in which sha-a is known (not converted)."""
+    manifest, results = (json.loads(c) for c in _galaxy_outputs(workflow_id))
+    manifest["files"][0]["action"] = "already_known"
+    results["files"] = []
+    galaxy.output, galaxy.results = (
+        json.dumps(c).encode() for c in (manifest, results)
+    )
+    galaxy.collections = {"coll-1": {}}  # no new project
+
+
+@pytest.mark.asyncio
+async def test_raw_file_already_in_a_project_is_skipped(
+    actions_fs, nomad_config, fake_galaxy, caplog
+):
+    first = f"zenodo-harvest-{uuid.uuid4()}"
+    _real_galaxy(fake_galaxy, first)
+    await _run_workflow(first, dry_run=False)
+    second = f"zenodo-harvest-{uuid.uuid4()}"
+    _known_again(fake_galaxy, second)
+
+    with caplog.at_level("INFO"):
+        result = await _run_workflow(second, dry_run=False)
+
+    run_dir = Path(result["run_dir"])
+    work_list = json.loads((run_dir / WORK_LIST_FILE).read_text())
+    # Galaxy is told for every record, not only for the record it came from.
+    assert all("sha-a" in r["known_sha256"] for r in work_list["records"])
+    assert "Raw file d/a.sxm (sha256 sha-a) is already in NOMAD project up-1" in (
+        caplog.text
+    )
+    report = json.loads(Path(result["report_path"]).read_text())
+    [duplicate] = [f for f in report["skipped_files"] if f["reason"] == "duplicate"]
+    assert (duplicate["key"], duplicate["upload_id"]) == ("d/a.sxm", "up-1")
+    assert list(nomad_config.projects) == ["up-1"]  # no second project
+
+
+@pytest.mark.asyncio
+async def test_duplicates_allowed_or_from_another_user(
+    actions_fs, nomad_config, fake_galaxy
+):
+    first = f"zenodo-harvest-{uuid.uuid4()}"
+    _real_galaxy(fake_galaxy, first)
+    await _run_workflow(first, dry_run=False)
+
+    for user_id, inputs in (("u1", {"allow_duplicate_projects": True}), ("u2", {})):
+        run_dir = actions_fs / "plan" / user_id
+        run_dir.mkdir(parents=True)
+        _search(run_dir)
+        ActivityEnvironment().run(
+            build_work_list,
+            BuildWorkListInput(
+                run_dir=str(run_dir), user_id=user_id, run_id="r", **inputs
+            ),
+        )
+        work_list = json.loads((run_dir / WORK_LIST_FILE).read_text())
+        others = [r for r in work_list["records"] if r["concept_record_id"] != CID]
+        assert others and not any("sha-a" in r["known_sha256"] for r in others)
 
 
 @pytest.mark.asyncio
@@ -755,7 +973,7 @@ async def test_workflow_dry_run_changes_nothing(actions_fs, nomad_config, fake_g
     assert result["nomad"] == {"status": "skipped", "reason": "dry_run"}
     assert result["merge"] == {"status": "skipped", "reason": "dry_run"}
     assert nomad_config.requests == []
-    with StateStore(actions_fs / "artifacts" / STATE_FILE) as store:
+    with StateStore(_state(actions_fs)) as store:
         assert store.known_sha256(CID) == []
 
 
@@ -856,12 +1074,15 @@ async def test_failed_run_ends_the_repeated_runs(actions_fs, galaxy_config):
     [report_path] = actions_fs.rglob(REPORT_FILE)  # no second run
     assert report_path.parent.name == "run-001"
     assert json.loads(report_path.read_text())["failure"]["step"] == "galaxy"
+    assert not list(actions_fs.rglob(ACTIVE_RUN_FILE))
 
 
 @pytest.mark.asyncio
 async def test_stopping_ends_the_repeated_runs(actions_fs, harvest_config_file):
     task_queue = f"test-{uuid.uuid4()}"
-    async with await WorkflowEnvironment.start_time_skipping() as env:
+    async with await WorkflowEnvironment.start_time_skipping(
+        data_converter=NOMAD_CONVERTER
+    ) as env:
         async with Worker(
             env.client,
             task_queue=task_queue,
@@ -882,6 +1103,7 @@ async def test_stopping_ends_the_repeated_runs(actions_fs, harvest_config_file):
     # Stopping is no failure, so no failure report is written.
     for report_path in actions_fs.rglob(REPORT_FILE):
         assert json.loads(report_path.read_text())["failure"] is None
+    assert not list(actions_fs.rglob(ACTIVE_RUN_FILE))
 
 
 # Report
@@ -918,7 +1140,9 @@ def _email_input(tmp_path) -> EmailReportInput:
 
 
 def test_email_report_without_smtp(tmp_path, monkeypatch):
-    monkeypatch.delenv("HARVEST_SMTP_HOST", raising=False)
+    from nomad.config import config  # noqa: PLC0415
+
+    monkeypatch.setattr(config, "mail", Mail())
 
     result = ActivityEnvironment().run(email_report, _email_input(tmp_path))
 
@@ -926,9 +1150,11 @@ def test_email_report_without_smtp(tmp_path, monkeypatch):
 
 
 def test_email_report_with_incomplete_smtp(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARVEST_SMTP_HOST", "127.0.0.1")
-    monkeypatch.delenv("HARVEST_SMTP_FROM", raising=False)
+    from nomad.config import config  # noqa: PLC0415
 
-    with pytest.raises(ApplicationError, match="HARVEST_SMTP_FROM") as error:
+    monkeypatch.setattr(config, "mail", Mail(enabled=True, host="127.0.0.1"))
+    monkeypatch.setattr(config.mail, "from_address", "")
+
+    with pytest.raises(ApplicationError, match="mail.from_address") as error:
         ActivityEnvironment().run(email_report, _email_input(tmp_path))
     assert error.value.non_retryable

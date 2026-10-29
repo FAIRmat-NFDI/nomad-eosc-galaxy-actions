@@ -41,6 +41,7 @@ class FakeZenodo(ThreadingHTTPServer):
         self.pages = {1: load_zenodo_page(1), 2: load_zenodo_page(2)}
         self.failures: list[int] = []
         self.requests: list[str] = []
+        self.auth_headers: list[str | None] = []
 
     @property
     def url(self) -> str:
@@ -52,6 +53,7 @@ class _FakeZenodoHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.requests.append(self.path)
+        self.server.auth_headers.append(self.headers.get("Authorization"))
         if self.server.failures:
             self._send(self.server.failures.pop(0), {}, {"Retry-After": "0"})
             return
@@ -109,6 +111,7 @@ class FakeGalaxy(ThreadingHTTPServer):
         self.job_states = ["ok"]
         self.invocation_outputs = {"manifest": {"id": "out-1", "src": "hda"}}
         self.requests: list[tuple[str, str]] = []
+        self.api_keys: set[str | None] = set()  # x-api-key headers received
         self.invocation_payload: dict = {}
         self.history_payload: dict = {}
 
@@ -212,6 +215,7 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
     def _path(self) -> str:
         path = urlparse(self.path).path.rstrip("/")
         self.server.requests.append((self.command, path))
+        self.server.api_keys.add(self.headers.get("x-api-key"))
         return path
 
     def _send(self, status, body, headers=None):
