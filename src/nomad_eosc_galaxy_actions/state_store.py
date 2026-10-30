@@ -80,17 +80,26 @@ def locked(path: Path) -> Iterator[None]:
 
 
 def write_atomically(path: Path, content: dict[str, Any]) -> None:
-    """Write JSON to a temporary file next to `path`, then rename it."""
+    """Write JSON to a temporary file next to `path`, then rename it.
+
+    `path` changes only with the rename, so on any error it keeps its old
+    content; the temporary file is removed.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False
     ) as tmp:
+        tmp_path = Path(tmp.name)
         try:
             json.dump(content, tmp, indent=1, sort_keys=True)
         except BaseException:
-            Path(tmp.name).unlink()
+            tmp_path.unlink()
             raise
-    os.replace(tmp.name, path)  # atomic on the same file system
+    try:
+        os.replace(tmp_path, path)  # atomic on the same file system
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 class StateStore:
@@ -177,10 +186,11 @@ class StateStore:
                 self._state = copy.deepcopy(before)
                 try:
                     yield
+                    write_atomically(self._path, self._state)
                 except BaseException:
+                    # The file is unchanged, so the store goes back to it too.
                     self._state = before
                     raise
-                write_atomically(self._path, self._state)
         finally:
             self._in_transaction = False
 

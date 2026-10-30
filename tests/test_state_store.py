@@ -128,6 +128,33 @@ def test_failed_transaction_saves_nothing(store, tmp_path):
     assert not list((tmp_path / "state").glob("*.tmp"))
 
 
+def test_failed_write_keeps_the_file_and_the_store_unchanged(store, tmp_path):
+    with store.transaction():
+        store.record_file(CID, "sha-a", status="success")
+    path = tmp_path / "state" / "state.json"
+    before = path.read_bytes()
+
+    # A value JSON cannot hold makes the write itself fail, after the changes.
+    with pytest.raises(TypeError), store.transaction():
+        store.record_file(CID, "sha-b", status="success", error=object())
+
+    assert path.read_bytes() == before
+    assert store.known_sha256(CID) == ["sha-a"]  # not the unsaved sha-b
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_failed_rename_removes_the_temporary_file(tmp_path):
+    path = tmp_path / "state.json"
+    (path / "blocked").mkdir(parents=True)  # a folder in the way of the rename
+    store = StateStore(path)
+
+    with pytest.raises(OSError), store.transaction():
+        store.record_loose_md5(CID, "md5-a", "sha-a")
+
+    assert not store.is_loose_md5_known(CID, "md5-a")
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_known_sha256_only_final_statuses(store):
     with store.transaction():
         store.record_file(CID, "sha-b", status="failed", error="reader error")
