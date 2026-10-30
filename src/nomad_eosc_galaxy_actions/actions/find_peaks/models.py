@@ -7,13 +7,7 @@
 
 from pydantic import BaseModel, Field, SecretStr, field_serializer
 
-
-def _serialize_secret(value: SecretStr | None) -> str | None:
-    """Expose the secret's plain value in JSON. Temporal serializes
-    activity/workflow inputs with `model_dump_json`, so without this the
-    activity on the other end would receive the masked placeholder instead
-    of the real key."""
-    return value.get_secret_value() if value is not None else None
+from nomad_eosc_galaxy_actions.credentials import reveal as _serialize_secret
 
 
 class BaseWorkflowInput(BaseModel):

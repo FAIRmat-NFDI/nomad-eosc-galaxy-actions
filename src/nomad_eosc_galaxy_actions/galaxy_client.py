@@ -106,7 +106,8 @@ def poll_invocation(
     * Each job's own outputs, keyed by the tool's output parameter names.
     * invocation["outputs"], keyed by labels declared as workflow outputs
     via workflow_outputs in the .ga file. These override job outputs
-    with the same name.
+    with the same name. Labelled collection outputs (invocation
+    ["output_collections"]) are added the same way, with collection IDs.
     """
     gi = get_instance(api_key, galaxy_url)
     invocation = gi.invocations.show_invocation(invocation_id)
@@ -126,10 +127,23 @@ def poll_invocation(
     outputs: dict[str, str] = {}
     for job in jobs:
         outputs.update({name: ref["id"] for name, ref in job["outputs"].items()})
-    outputs.update(
-        {name: ref["id"] for name, ref in invocation.get("outputs", {}).items()}
-    )
+    for key in ("outputs", "output_collections"):
+        outputs.update(
+            {name: ref["id"] for name, ref in invocation.get(key, {}).items()}
+        )
     return {"done": True, "state": "ok", "outputs": outputs}
+
+
+def collection_elements(
+    api_key: str, collection_id: str, galaxy_url: str = GALAXY_URL
+) -> dict[str, str]:
+    """Element identifiers → dataset IDs of a (flat) dataset collection."""
+    gi = get_instance(api_key, galaxy_url)
+    collection = gi.dataset_collections.show_dataset_collection(collection_id)
+    return {
+        element["element_identifier"]: element["object"]["id"]
+        for element in collection["elements"]
+    }
 
 
 def download_dataset(

@@ -24,7 +24,20 @@
     "en_US",
     "python"
   ],
-  "words": [],
+  "words": [
+    "caplog",
+    "conceptdoi",
+    "conceptrecid",
+    "delenv",
+    "executescript",
+    "forcelist",
+    "hdca",
+    "Invenio",
+    "jwsv",
+    "Nanonis",
+    "replayable",
+    "topo"
+  ],
   "ignoreWords": [],
   "ignoreRegExpList": ["\\bNX\\w*\\b", "https?://[\\S]+"],
   "language": "en-US"

@@ -77,3 +77,38 @@ The generic `/actions` form doesn't have this problem: it's auto-generated from 
 ## Why a workflow, not the bare tool
 
 This plugin invokes the *workflow*, not the tool directly, even though today the workflow has exactly one step. That's deliberate: if peak finding ever grows a second step (background subtraction, a trained classifier, a second technique), that's a change to the workflow definition on the Galaxy side only — this plugin's code doesn't need to change to call a second tool or start orchestrating a sequence itself. Bioblend can invoke either a bare tool or a workflow with about the same amount of code, so this costs nothing today and keeps the door open.
+
+## File versions of `zenodo_harvest`
+
+Every file the `zenodo_harvest` Action reads or writes carries a `schema_version`: the version of the file's layout (its keys and their meaning), not of its values. The version is bumped when a key is renamed, removed or changes meaning. The constants in the code are the source of truth.
+
+**Read again and upgraded when old.** These files outlive a plugin update, so older versions are upgraded in memory on load; the file itself is never rewritten.
+
+| File | Version constant | Written or read by |
+|---|---|---|
+| `harvest_config.json` | `HARVEST_CONFIG_SCHEMA_VERSION` | `load_harvest_config` |
+| `users/<user_id>/state.json` | `STATE_SCHEMA_VERSION` | `StateStore` |
+| `checksum_index.json` | `CHECKSUM_INDEX_SCHEMA_VERSION` | `ChecksumIndex` |
+
+**Contract with Galaxy, checked strictly.** The plugin and the Galaxy tools must agree on these; another version is rejected, not upgraded. Galaxy gets the work list of one batch; the manifest, results and project zips of that batch are stored in its `batch-NNN/` folder.
+
+| File | Version constant | Written or read by |
+|---|---|---|
+| `work_list.json` | `WORK_LIST_SCHEMA_VERSION` | `build_work_list` (whole run), `prepare_batch` (one per `batch-NNN/` folder) |
+| `manifest.json`, `results.json` | `Literal[1]` in `Manifest`, `Results` | `fetch_manifest`, `merge_manifest` |
+
+**Written into each NOMAD project.**
+
+| File | Version constant | Written or read by |
+|---|---|---|
+| `zenodo_harvest.json` | `HARVEST_METADATA_SCHEMA_VERSION` | `add_harvest_metadata` |
+
+**Records of one run.** Read only within the same run; the version tells people and scripts which layout an old run folder has.
+
+| File | Version constant | Written or read by |
+|---|---|---|
+| `run_config.json` | `RUN_CONFIG_SCHEMA_VERSION` | `write_run_config` |
+| `candidates.json` | `CANDIDATES_SCHEMA_VERSION` | `write_candidates` |
+| `skipped_files.json` | `SKIPPED_FILES_SCHEMA_VERSION` | `write_work_list` |
+| `batch-NNN/duplicates.json` | `DUPLICATES_SCHEMA_VERSION` | `fetch_manifest` |
+| `report.json` | `REPORT_SCHEMA_VERSION` | `build_report` |
