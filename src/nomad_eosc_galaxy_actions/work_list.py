@@ -103,6 +103,11 @@ def plan_record(
     return (work + context if work else []), skipped
 
 
+def _known(store: StateStore, concept_record_id: str, in_projects: Iterable[str]):
+    """Raw files Galaxy must not convert again for this record."""
+    return sorted(set(in_projects).union(store.known_sha256(concept_record_id)))
+
+
 def build_work_list(  # noqa: PLR0913
     candidates: Iterable[ZenodoRecord],
     store: StateStore,
@@ -123,7 +128,6 @@ def build_work_list(  # noqa: PLR0913
     already in one of the user's projects), so Galaxy does not convert them
     again when they show up in a new archive.
     """
-    in_projects = set(in_projects)
     records: list[dict[str, Any]] = []
     skipped: list[SkippedFile] = []
     for record in candidates:
@@ -144,9 +148,7 @@ def build_work_list(  # noqa: PLR0913
                 "creators": record.creators,
                 "description_html": record.description_html,
                 "download": [_file_entry(file) for file in download],
-                "known_sha256": sorted(
-                    in_projects.union(store.known_sha256(record.concept_record_id))
-                ),
+                "known_sha256": _known(store, record.concept_record_id, in_projects),
             }
         )
     work_list = {
@@ -162,3 +164,27 @@ def build_work_list(  # noqa: PLR0913
         "records": records,
     }
     return work_list, skipped
+
+
+def batch_work_list(
+    content: dict[str, Any],
+    record_ids: Iterable[str],
+    *,
+    run_id: str,
+    store: StateStore,
+    in_projects: Iterable[str] = (),
+) -> dict[str, Any]:
+    """The work list of one batch: the run's work list with only these records.
+
+    It gets the batch's own `run_id` and `known_sha256` read again, so raw
+    files handled by an earlier batch of the same run are not converted again.
+    """
+    in_projects = set(in_projects)
+    wanted = set(record_ids)
+    records = [
+        record
+        | {"known_sha256": _known(store, record["concept_record_id"], in_projects)}
+        for record in content["records"]
+        if record["record_id"] in wanted
+    ]
+    return content | {"run_id": run_id, "records": records}

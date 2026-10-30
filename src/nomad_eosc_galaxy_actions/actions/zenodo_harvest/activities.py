@@ -54,6 +54,8 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     MergeStateInput,
     PollGalaxyInput,
     PollGalaxyResult,
+    PrepareBatchInput,
+    PrepareBatchResult,
     PrepareRunInput,
     PrepareRunResult,
     RunGalaxyInput,
@@ -101,6 +103,8 @@ CHECKSUM_INDEX_FILE = "checksum_index.json"
 RUN_MAX_AGE = timedelta(days=2)
 # NOMAD user IDs are UUIDs; anything else must not become a folder name.
 USER_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+# Each batch of records has its own folder in the run folder: batch-001, ...
+BATCH_FOLDER_PREFIX = "batch-"
 DUPLICATES_FILE = "duplicates.json"
 # Version of the duplicates.json layout (same rule as RUN_CONFIG_SCHEMA_VERSION).
 DUPLICATES_SCHEMA_VERSION = 1
@@ -326,10 +330,8 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
         zenodo_client.ZenodoRecord.model_validate(record)
         for record in search_result["candidates"]
     ]
-    in_projects = (
-        []
-        if data.allow_duplicate_projects
-        else _checksum_index(harvest_config).known_sha256(data.user_id)
+    in_projects = _in_projects(
+        harvest_config, data.user_id, data.allow_duplicate_projects
     )
     with StateStore(_state_path(harvest_config, data.user_id)) as store:
         content, skipped = work_list.build_work_list(
@@ -349,10 +351,46 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
     return BuildWorkListResult(
         work_list_path=str(path),
         records=len(records),
+        record_ids=[record["record_id"] for record in records],
         files=files,
         skipped=len(skipped),
         galaxy_configured=bool(harvest_config.galaxy_workflow_id),
     )
+
+
+def _in_projects(harvest_config: HarvestConfig, user_id: str, allowed: bool):
+    """Raw files in the user's projects; none when duplicates are allowed."""
+    if allowed:
+        return []
+    return _checksum_index(harvest_config).known_sha256(user_id)
+
+
+@activity.defn
+def prepare_batch(data: PrepareBatchInput) -> PrepareBatchResult:
+    """Write the work list of one batch into its own folder of the run.
+
+    Reads the state again, so files that an earlier batch converted count as
+    known (see `work_list.batch_work_list`).
+    """
+    harvest_config = _harvest_config()
+    run_dir = Path(data.run_dir)
+    content = json.loads((run_dir / WORK_LIST_FILE).read_text(encoding="utf-8"))
+    in_projects = _in_projects(
+        harvest_config, data.user_id, data.allow_duplicate_projects
+    )
+    with StateStore(_state_path(harvest_config, data.user_id)) as store:
+        batch = work_list.batch_work_list(
+            content,
+            data.record_ids,
+            run_id=data.run_id,
+            store=store,
+            in_projects=in_projects,
+        )
+    batch_dir = run_dir / data.folder
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    path = batch_dir / WORK_LIST_FILE
+    path.write_text(json.dumps(batch, indent=2), encoding="utf-8")
+    return PrepareBatchResult(batch_dir=str(batch_dir), work_list_path=str(path))
 
 
 @activity.defn
@@ -608,26 +646,61 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
+def _joined_outputs(
+    run_dir: Path,
+) -> tuple[Manifest | None, Results | None, dict[str, Any]]:
+    """Galaxy's manifests, results and duplicates of all batches, joined.
+
+    A placeholder batch returns its work list as manifest, which is no
+    manifest, so it is left out.
+    """
+    manifests, results, duplicates = [], [], []
+    for batch_dir in sorted(run_dir.glob(f"{BATCH_FOLDER_PREFIX}*")):
+        manifest = _read_json(batch_dir / MANIFEST_FILE)
+        if manifest and manifest != _read_json(batch_dir / WORK_LIST_FILE):
+            manifests.append(Manifest.model_validate(manifest))
+        if result := _read_json(batch_dir / RESULTS_FILE):
+            results.append(Results.model_validate(result))
+        duplicates += (_read_json(batch_dir / DUPLICATES_FILE) or {}).get(
+            "duplicates", []
+        )
+    joined_manifest = (
+        Manifest(
+            schema_version=1,
+            run_id=manifests[0].run_id,
+            tool_version=manifests[0].tool_version,
+            archives=[a for m in manifests for a in m.archives],
+            files=[f for m in manifests for f in m.files],
+        )
+        if manifests
+        else None
+    )
+    joined_results = (
+        Results(
+            schema_version=1,
+            run_id=results[0].run_id,
+            files=[f for r in results for f in r.files],
+        )
+        if results
+        else None
+    )
+    return joined_manifest, joined_results, {"duplicates": duplicates}
+
+
 @activity.defn
 def write_report(data: WriteReportInput) -> WriteReportResult:
     """Write `report.json` and `report.md` into the run folder."""
     run_dir = Path(data.run_dir)
-    manifest = _read_json(run_dir / MANIFEST_FILE)
-    results = _read_json(run_dir / RESULTS_FILE)
+    manifest, results, duplicates = _joined_outputs(run_dir)
     content = report.build_report(
         run_config=_read_json(run_dir / RUN_CONFIG_FILE) or {},
         candidates=_read_json(run_dir / CANDIDATES_FILE) or {},
         work_list=_read_json(run_dir / WORK_LIST_FILE),
         skipped_files=_read_json(run_dir / SKIPPED_FILES_FILE),
-        # Placeholder runs return the work list as manifest, so check first.
-        manifest=(
-            Manifest.model_validate(manifest)
-            if manifest and not data.steps.get("galaxy", {}).get("placeholder")
-            else None
-        ),
-        results=Results.model_validate(results) if results else None,
+        manifest=manifest,
+        results=results,
         steps=data.steps,
-        duplicates=_read_json(run_dir / DUPLICATES_FILE),
+        duplicates=duplicates,
     )
     report_path = run_dir / REPORT_FILE
     report_path.write_text(json.dumps(content, indent=2), encoding="utf-8")

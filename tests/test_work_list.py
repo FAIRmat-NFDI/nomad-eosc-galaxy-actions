@@ -9,6 +9,7 @@ from nomad_eosc_galaxy_actions.state_store import StateStore
 from nomad_eosc_galaxy_actions.work_list import (
     WORK_LIST_SCHEMA_VERSION,
     WorkListSettings,
+    batch_work_list,
     build_work_list,
     plan_record,
 )
@@ -238,3 +239,20 @@ def test_files_in_projects_are_known_for_every_record(store):
     )
 
     assert content["records"][0]["known_sha256"] == ["sha-elsewhere", "sha-own"]
+
+
+def test_batch_work_list_selects_records_and_reads_the_state_again(store):
+    records = [_record(("v1.zip", 10, f"m{n}"), record_id=f"10{n}") for n in (1, 2)]
+    content, _ = build_work_list(records, store, SETTINGS, run_id="run-1")
+    with store.transaction():  # an earlier batch converted a file
+        store.record_file(CID, "sha-new", status="success")
+
+    batch = batch_work_list(
+        content, ["102"], run_id="run-1-batch-002", store=store, in_projects=["sha-p"]
+    )
+
+    assert batch["run_id"] == "run-1-batch-002"
+    assert [r["record_id"] for r in batch["records"]] == ["102"]
+    assert batch["records"][0]["known_sha256"] == ["sha-new", "sha-p"]
+    assert batch["raw_extensions"] == content["raw_extensions"]
+    assert content["run_id"] == "run-1"  # the run's work list is unchanged

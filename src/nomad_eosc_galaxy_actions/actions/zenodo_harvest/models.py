@@ -36,6 +36,14 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "this run (useful for small test runs); already handled records do not "
         "count. Empty means no limit.",
     )
+    records_per_work_list: int | None = Field(
+        1,
+        ge=1,
+        description="Zenodo records (datasets) sent to Galaxy together in one work "
+        "list; each work list is one Galaxy run. 1 isolates the datasets, so one "
+        "failing dataset does not hold up the others. Empty means all records in "
+        "one work list.",
+    )
     repeat_every_days: int | None = Field(
         None,
         ge=1,
@@ -150,11 +158,28 @@ class BuildWorkListInput(BaseModel):
 class BuildWorkListResult(BaseModel):
     work_list_path: str
     records: int = Field(..., description="Records with something to download.")
+    record_ids: list[str] = Field(..., description="Their IDs, in work list order.")
     files: int = Field(..., description="Files to download, context files included.")
     skipped: int = Field(..., description="Files not downloaded, with a reason.")
     galaxy_configured: bool = Field(
         ..., description="A Galaxy workflow ID is set in the harvest config."
     )
+
+
+class PrepareBatchInput(BaseModel):
+    """Input for the activity that writes the work list of one batch."""
+
+    run_dir: str
+    folder: str = Field(..., description="The batch's subfolder, e.g. batch-001.")
+    user_id: str
+    run_id: str = Field(..., description="The batch's own run ID, sent to Galaxy.")
+    record_ids: list[str]
+    allow_duplicate_projects: bool = False
+
+
+class PrepareBatchResult(BaseModel):
+    batch_dir: str
+    work_list_path: str
 
 
 class RunGalaxyInput(GalaxyKeyInput):

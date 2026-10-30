@@ -90,11 +90,11 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 | `users/<user_id>/state.json` | `STATE_SCHEMA_VERSION` | `StateStore` |
 | `checksum_index.json` | `CHECKSUM_INDEX_SCHEMA_VERSION` | `ChecksumIndex` |
 
-**Contract with Galaxy, checked strictly.** The plugin and the Galaxy tools must agree on these; another version is rejected, not upgraded.
+**Contract with Galaxy, checked strictly.** The plugin and the Galaxy tools must agree on these; another version is rejected, not upgraded. Galaxy gets the work list of one batch; the manifest, results and project zips of that batch are stored in its `batch-NNN/` folder.
 
 | File | Version constant | Written or read by |
 |---|---|---|
-| `work_list.json` | `WORK_LIST_SCHEMA_VERSION` | `build_work_list` |
+| `work_list.json` | `WORK_LIST_SCHEMA_VERSION` | `build_work_list` (whole run), `prepare_batch` (one per `batch-NNN/` folder) |
 | `manifest.json`, `results.json` | `Literal[1]` in `Manifest`, `Results` | `fetch_manifest`, `merge_manifest` |
 
 **Written into each NOMAD project.**
@@ -110,5 +110,5 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 | `run_config.json` | `RUN_CONFIG_SCHEMA_VERSION` | `write_run_config` |
 | `candidates.json` | `CANDIDATES_SCHEMA_VERSION` | `write_candidates` |
 | `skipped_files.json` | `SKIPPED_FILES_SCHEMA_VERSION` | `write_work_list` |
-| `duplicates.json` | `DUPLICATES_SCHEMA_VERSION` | `fetch_manifest` |
+| `batch-NNN/duplicates.json` | `DUPLICATES_SCHEMA_VERSION` | `fetch_manifest` |
 | `report.json` | `REPORT_SCHEMA_VERSION` | `build_report` |

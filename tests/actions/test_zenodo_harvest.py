@@ -49,6 +49,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     finish_run,
     merge_state,
     poll_galaxy,
+    prepare_batch,
     prepare_run,
     run_galaxy,
     search_zenodo,
@@ -79,7 +80,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
     ZenodoHarvestWorkflow,
 )
 from nomad_eosc_galaxy_actions.report import REPORT_SCHEMA_VERSION
-from nomad_eosc_galaxy_actions.state_store import ACTIVE_RUN_FILE
+from nomad_eosc_galaxy_actions.state_store import ACTIVE_RUN_FILE, StateStore
 from nomad_eosc_galaxy_actions.work_list import WORK_LIST_SCHEMA_VERSION
 
 
@@ -129,7 +130,9 @@ def test_write_run_config_overwrites_previous_run(tmp_path):
     assert json.loads(path.read_text())["dry_run"] is False
 
 
-@pytest.mark.parametrize("field", ["max_records", "repeat_every_days", "max_runs"])
+@pytest.mark.parametrize(
+    "field", ["max_records", "records_per_work_list", "repeat_every_days", "max_runs"]
+)
 @pytest.mark.parametrize("value", [0, -1])
 def test_workflow_input_rejects_non_positive_numbers(field, value):
     with pytest.raises(ValidationError):
@@ -152,6 +155,13 @@ def test_secrets_are_hidden_in_the_form_and_the_model():
     assert "'k'" not in repr(data)
     # Temporal sends the input as JSON, so the activity gets the real value.
     assert json.loads(data.model_dump_json())["galaxy_api_key"] == "k"
+
+
+def test_one_record_per_work_list_is_prefilled():
+    schema = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
+    assert schema["records_per_work_list"]["default"] == 1
+    data = ZenodoHarvestWorkflowInput(user_id="u1", records_per_work_list=None)
+    assert data.records_per_work_list is None  # empty: all records in one
 
 
 def test_run_number_is_not_in_the_form():
@@ -272,6 +282,7 @@ ALL_ACTIVITIES = [
     prepare_run,
     search_zenodo,
     build_work_list,
+    prepare_batch,
     run_galaxy,
     poll_galaxy,
     fetch_manifest,
@@ -775,23 +786,79 @@ async def test_workflow_galaxy_round_trip(actions_fs, galaxy_config):
 
     result = await _run_workflow(workflow_id)
 
-    galaxy = result["galaxy"]
-    assert galaxy["status"] == "ok" and galaxy["placeholder"] is True
-    assert galaxy["history_id"] == "hist-1"
+    # Two planned records, one record per work list (the default): two batches.
+    assert result["galaxy"] == {
+        "status": "ok",
+        "batches": 2,
+        "failed": 0,
+        "history_ids": ["hist-1", "hist-1"],
+        "placeholder": True,
+    }
+    assert [w["run_id"] for w in galaxy_config.work_lists] == [
+        f"{workflow_id}-batch-001",
+        f"{workflow_id}-batch-002",
+    ]
+    assert [len(w["records"]) for w in galaxy_config.work_lists] == [1, 1]
     run_dir = Path(result["run_dir"])
-    manifest = json.loads(Path(galaxy["manifest_path"]).read_text())
-    assert manifest == json.loads((run_dir / WORK_LIST_FILE).read_text())
+    for batch in result["batches"]:
+        manifest = json.loads(Path(batch["galaxy"]["manifest_path"]).read_text())
+        sent = run_dir / batch["folder"] / WORK_LIST_FILE
+        assert manifest == json.loads(sent.read_text())  # the placeholder's echo
     polls = [r for r in galaxy_config.requests if r[1] == "/api/jobs/job-1"]
-    assert len(polls) == 3  # noqa: PLR2004
+    assert len(polls) == 4  # noqa: PLR2004  (3 for the first batch, 1 for the second)
     assert result["nomad"] == {"status": "skipped", "reason": "placeholder"}
     assert result["merge"] == {"status": "skipped", "reason": "placeholder"}
 
 
-def _real_galaxy(galaxy, workflow_id: str) -> None:
-    """Make the fake Galaxy return real outputs for this run."""
-    galaxy.output, galaxy.results = _galaxy_outputs(workflow_id)
+def _real_galaxy(galaxy, raw_files: dict | None = None) -> None:
+    """Let the fake Galaxy convert like the real workflow, per work list.
+
+    `raw_files` maps record ID → (sha256, path) of its one raw file; by
+    default only the first record has one. A file in the record's
+    `known_sha256` is skipped as already known; only records with a
+    converted file get a project zip.
+    """
+    raw_files = raw_files or {RECORD: ("sha-a", "d/a.sxm")}
+
+    def respond(work_list: dict) -> None:
+        archives, files, results, zips = [], [], [], {}
+        for record in work_list["records"]:
+            record_id = record["record_id"]
+            if record_id not in raw_files:
+                continue
+            sha256, path = raw_files[record_id]
+            known = sha256 in record["known_sha256"]
+            ids = {
+                "concept_record_id": record["concept_record_id"],
+                "record_id": record_id,
+            }
+            md5 = "zip-md5" if record_id == RECORD else f"zip-{record_id}"
+            archives.append(ids | {"key": "d.zip", "md5": md5, "status": "extracted"})
+            files.append(
+                ids
+                | {
+                    "source": "archive",
+                    "archive_key": "d.zip",
+                    "path": path,
+                    "size": 1,
+                    "sha256": sha256,
+                    "role": "raw",
+                    "action": "already_known" if known else "process",
+                }
+            )
+            if not known:
+                results.append(
+                    {"sha256": sha256, "status": "success", "nexus_path": "a/a.nxs"}
+                )
+                zips[record_id] = _project_zip()
+        run = {"schema_version": 1, "run_id": work_list["run_id"]}
+        manifest = run | {"tool_version": "0.1", "archives": archives, "files": files}
+        galaxy.output = json.dumps(manifest).encode()
+        galaxy.results = json.dumps(run | {"files": results}).encode()
+        galaxy.collections = {"coll-1": zips}
+
+    galaxy.on_invoke = respond
     galaxy.invocation_outputs |= {"results": {"id": "out-2", "src": "hda"}}
-    galaxy.collections = {"coll-1": {RECORD: _project_zip()}}
     galaxy.invocation_collections = {"projects": {"id": "coll-1", "src": "hdca"}}
 
 
@@ -802,7 +869,7 @@ async def test_workflow_creates_projects_and_merges(
     from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, workflow_id)
+    _real_galaxy(fake_galaxy)
 
     result = await _run_workflow(workflow_id, dry_run=False)
 
@@ -853,7 +920,7 @@ async def test_every_written_file_has_its_schema_version(
     from nomad_eosc_galaxy_actions import state_store  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, workflow_id)
+    _real_galaxy(fake_galaxy)
 
     result = await _run_workflow(workflow_id, dry_run=False)
 
@@ -866,9 +933,14 @@ async def test_every_written_file_has_its_schema_version(
         DUPLICATES_FILE: DUPLICATES_SCHEMA_VERSION,
         REPORT_FILE: REPORT_SCHEMA_VERSION,
     }
+    batch_files = (WORK_LIST_FILE, DUPLICATES_FILE)
     for name, version in versions.items():
-        content = json.loads((run_dir / name).read_text())
+        folder = run_dir / "batch-001" if name in batch_files else run_dir
+        content = json.loads((folder / name).read_text())
         assert content["schema_version"] == version, name
+    assert json.loads((run_dir / WORK_LIST_FILE).read_text())["schema_version"] == (
+        WORK_LIST_SCHEMA_VERSION
+    )
     with state_store.StateStore(_state(actions_fs)) as store:
         assert store.schema_version == state_store.STATE_SCHEMA_VERSION
 
@@ -878,7 +950,7 @@ async def test_secrets_from_the_form_are_never_written(
     actions_fs, nomad_config, fake_galaxy, fake_zenodo, caplog
 ):
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, workflow_id)
+    _real_galaxy(fake_galaxy)
     secrets = {"galaxy_api_key": "form-key-123", "zenodo_token": "form-token-456"}
 
     with caplog.at_level("DEBUG"):
@@ -901,26 +973,14 @@ async def test_secrets_from_the_form_are_never_written(
         assert secret not in json.dumps(result)
 
 
-def _known_again(galaxy, workflow_id: str) -> None:
-    """Galaxy's outputs of a later run, in which sha-a is known (not converted)."""
-    manifest, results = (json.loads(c) for c in _galaxy_outputs(workflow_id))
-    manifest["files"][0]["action"] = "already_known"
-    results["files"] = []
-    galaxy.output, galaxy.results = (
-        json.dumps(c).encode() for c in (manifest, results)
-    )
-    galaxy.collections = {"coll-1": {}}  # no new project
-
-
 @pytest.mark.asyncio
 async def test_raw_file_already_in_a_project_is_skipped(
     actions_fs, nomad_config, fake_galaxy, caplog
 ):
     first = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, first)
+    _real_galaxy(fake_galaxy)
     await _run_workflow(first, dry_run=False)
     second = f"zenodo-harvest-{uuid.uuid4()}"
-    _known_again(fake_galaxy, second)
 
     with caplog.at_level("INFO"):
         result = await _run_workflow(second, dry_run=False)
@@ -943,7 +1003,7 @@ async def test_duplicates_allowed_or_from_another_user(
     actions_fs, nomad_config, fake_galaxy
 ):
     first = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, first)
+    _real_galaxy(fake_galaxy)
     await _run_workflow(first, dry_run=False)
 
     for user_id, inputs in (("u1", {"allow_duplicate_projects": True}), ("u2", {})):
@@ -961,12 +1021,144 @@ async def test_duplicates_allowed_or_from_another_user(
         assert others and not any("sha-a" in r["known_sha256"] for r in others)
 
 
+# Batches: one work list and one Galaxy run per `records_per_work_list` records
+
+# The first three records of the recorded search, each with one raw file.
+SECOND, THIRD = "10443995", "22806339"
+THREE_FILES = {
+    RECORD: ("sha-a", "d/a.sxm"),
+    SECOND: ("sha-b", "d/b.sxm"),
+    THIRD: ("sha-c", "d/c.sxm"),
+}
+
+
+@pytest.mark.asyncio
+async def test_each_record_is_its_own_galaxy_run(actions_fs, nomad_config, fake_galaxy):
+    _real_galaxy(fake_galaxy, THREE_FILES)
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+
+    result = await _run_workflow(workflow_id, dry_run=False)
+
+    assert [w["record_id"] for wl in fake_galaxy.work_lists for w in wl["records"]] == [
+        RECORD,
+        SECOND,
+    ]
+    assert sorted(result["nomad"]["upload_ids"]) == [SECOND, RECORD]
+    assert result["merge"]["success"] == 2  # noqa: PLR2004
+    run_dir = Path(result["run_dir"])
+    assert sorted(p.name for p in run_dir.glob("batch-*")) == ["batch-001", "batch-002"]
+    assert (run_dir / "batch-002" / PROJECTS_DIR / f"{SECOND}.zip").is_file()
+    report = json.loads(Path(result["report_path"]).read_text())
+    assert [b["folder"] for b in report["batches"]] == ["batch-001", "batch-002"]
+    text = (run_dir / REPORT_MARKDOWN_FILE).read_text()
+    assert "| Galaxy | ok: 2 batches |" in text
+    assert (
+        f"| batch-002 | {SECOND} | hist-1 | ok: 1 created, 0 reused, 0 left out |"
+        in (text)
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_field_sends_all_records_in_one_work_list(
+    actions_fs, nomad_config, fake_galaxy
+):
+    _real_galaxy(fake_galaxy, THREE_FILES)
+
+    result = await _run_workflow(
+        f"zenodo-harvest-{uuid.uuid4()}", dry_run=False, records_per_work_list=None
+    )
+
+    [work_list] = fake_galaxy.work_lists
+    assert [r["record_id"] for r in work_list["records"]] == [RECORD, SECOND]
+    assert result["galaxy"]["batches"] == 1
+    assert len(result["nomad"]["created"]) == 2  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_file_converted_in_an_earlier_batch_is_a_duplicate(
+    actions_fs, nomad_config, fake_galaxy
+):
+    # The same raw file is in both records.
+    _real_galaxy(
+        fake_galaxy, {RECORD: ("sha-a", "d/a.sxm"), SECOND: ("sha-a", "x.sxm")}
+    )
+
+    result = await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    first, second = fake_galaxy.work_lists
+    assert "sha-a" not in first["records"][0]["known_sha256"]
+    assert "sha-a" in second["records"][0]["known_sha256"]  # read again per batch
+    assert result["nomad"]["created"] == [RECORD]
+    report = json.loads(Path(result["report_path"]).read_text())
+    [duplicate] = [f for f in report["skipped_files"] if f["reason"] == "duplicate"]
+    assert (duplicate["record_id"], duplicate["upload_id"]) == (SECOND, "up-1")
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_does_not_stop_the_others(
+    actions_fs, nomad_config, fake_galaxy
+):
+    _real_galaxy(fake_galaxy, THREE_FILES)
+    convert = fake_galaxy.on_invoke
+
+    def first_fails(work_list):
+        convert(work_list)
+        fake_galaxy.job_states = ["error" if len(fake_galaxy.work_lists) == 1 else "ok"]
+
+    fake_galaxy.on_invoke = first_fails
+    workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
+
+    with pytest.raises(WorkflowFailureError):
+        await _run_workflow(workflow_id, dry_run=False)
+
+    assert [p["upload_name"] for p in nomad_config.projects.values()] == [
+        f"zgn-demo-10443994-{SECOND}"
+    ]
+    with StateStore(_state(actions_fs)) as store:
+        assert store.known_sha256("10443994") == ["sha-b"]
+        assert store.known_sha256(CID) == []  # retried by the next run
+    [report_path] = actions_fs.rglob(REPORT_FILE)
+    report = json.loads(report_path.read_text())
+    assert report["failure"]["step"] == "galaxy"
+    assert report["failure"]["error"].startswith("1 of 2 batches failed; batch-001:")
+    left_out = {r["record_id"]: r["left_out"] for r in report["records"]}
+    assert left_out == {RECORD: "batch_failed", SECOND: None}
+    assert not list(actions_fs.rglob(ACTIVE_RUN_FILE))
+
+
+@pytest.mark.asyncio
+async def test_batches_after_the_project_limit_are_skipped(
+    actions_fs, nomad_config, fake_galaxy
+):
+    nomad_config.projects = {
+        f"u{i}": {"upload_name": f"zgn-demo-1-{i}", "published": False}
+        for i in range(9)
+    }
+    _real_galaxy(fake_galaxy, THREE_FILES)
+
+    result = await _run_workflow(
+        f"zenodo-harvest-{uuid.uuid4()}", max_records=3, dry_run=False
+    )
+
+    assert len(fake_galaxy.work_lists) == 2  # noqa: PLR2004  (the third is not sent)
+    assert result["nomad"]["created"] == [RECORD]  # the 10th demo project
+    assert result["nomad"]["left_out"] == {
+        SECOND: "project_limit",
+        THIRD: "project_limit",
+    }
+    assert result["batches"][2] == {
+        "folder": "batch-003",
+        "records": [THIRD],
+        "skipped": "project_limit",
+    }
+
+
 @pytest.mark.asyncio
 async def test_workflow_dry_run_changes_nothing(actions_fs, nomad_config, fake_galaxy):
     from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, workflow_id)
+    _real_galaxy(fake_galaxy)
 
     result = await _run_workflow(workflow_id, dry_run=True)
 
@@ -983,7 +1175,7 @@ async def test_workflow_fails_without_output(
     actions_fs, nomad_config, fake_galaxy, missing
 ):
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
-    _real_galaxy(fake_galaxy, workflow_id)
+    _real_galaxy(fake_galaxy)
     fake_galaxy.invocation_outputs.pop(missing, None)
     fake_galaxy.invocation_collections.pop(missing, None)
 

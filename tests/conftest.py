@@ -94,7 +94,9 @@ class FakeGalaxy(ThreadingHTTPServer):
     for upload (tus), invoke, poll and download.
 
     The workflow behaves like the placeholder: its `manifest` output is the
-    uploaded file, unless `output` is set. Add a `results` entry to
+    uploaded file, unless `output` is set. `on_invoke`, if set, is called with
+    each uploaded work list before its invocation starts, so a test can set
+    the outputs per work list; `work_lists` keeps them all. Add a `results` entry to
     `invocation_outputs` to serve `results`. `collections` maps collection IDs
     to {element identifier: content}, served as datasets `<collection>-<identifier>`;
     label them in `invocation_collections`. `job_states` lists the job state
@@ -114,6 +116,8 @@ class FakeGalaxy(ThreadingHTTPServer):
         self.api_keys: set[str | None] = set()  # x-api-key headers received
         self.invocation_payload: dict = {}
         self.history_payload: dict = {}
+        self.on_invoke = None
+        self.work_lists: list[dict] = []
 
     @property
     def url(self) -> str:
@@ -131,6 +135,7 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
         path = self._path()
         body = self._body()
         if path == self._TUS:  # tus: create the upload
+            self.server.uploaded = b""
             self._send(201, {}, {"Location": f"{self._TUS}/session-1"})
         elif path == "/api/tools/fetch":
             self._send(200, {"outputs": [{"id": "in-1"}]})
@@ -139,6 +144,10 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
             self._send(200, {"id": "hist-1"})
         elif path.endswith("/invocations"):
             self.server.invocation_payload = json.loads(body)
+            work_list = json.loads(self.server.uploaded)
+            self.server.work_lists.append(work_list)
+            if self.server.on_invoke:
+                self.server.on_invoke(work_list)
             self._send(200, {"id": "inv-1"})
         else:
             self._send(404, {"err_msg": f"unknown {path}"})

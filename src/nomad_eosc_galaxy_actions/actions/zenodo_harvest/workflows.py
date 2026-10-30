@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
         finish_run,
         merge_state,
         poll_galaxy,
+        prepare_batch,
         prepare_run,
         run_galaxy,
         search_zenodo,
@@ -30,7 +31,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
         BuildWorkListInput,
-        BuildWorkListResult,
         CreateProjectsInput,
         CreateProjectsResult,
         EmailReportInput,
@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
         FinishRunInput,
         MergeStateInput,
         PollGalaxyInput,
+        PrepareBatchInput,
         PrepareRunInput,
         RunGalaxyInput,
         SearchZenodoInput,
@@ -183,29 +184,32 @@ class ZenodoHarvestWorkflow:
         )
 
         self._step = "galaxy"
-        galaxy, fetched, collection_id = await self._run_galaxy(
-            run_dir, planned, run_id, data, retry_policy
-        )
-        steps["galaxy"] = galaxy
-        skip = _skip_reason(fetched, data.dry_run)
-        if skip:
-            nomad = merge = {"status": "skipped", "reason": skip}
+        if planned.records == 0:
+            skipped = {"status": "skipped", "reason": "no_work"}
+        elif not planned.galaxy_configured:
+            skipped = {"status": "skipped", "reason": "galaxy_not_configured"}
         else:
-            self._step = "nomad"
-            nomad, projects = await self._create_projects(
-                run_dir,
-                planned,
-                fetched=fetched,
-                data=data,
-                collection_id=collection_id,
-                retry_policy=retry_policy,
+            skipped = None
+        if skipped:
+            galaxy = skipped
+            nomad = merge = {"status": "skipped", "reason": "no_galaxy_run"}
+            steps |= {"galaxy": galaxy, "nomad": nomad, "merge": merge}
+        else:
+            batches = await self._batches(
+                data, run_id, run_dir, planned.record_ids, retry_policy
             )
-            steps["nomad"] = nomad
-            self._step = "merge"
-            merge = await self._merge_state(
-                fetched, projects, data.user_id, retry_policy
-            )
-        steps |= {"nomad": nomad, "merge": merge}
+            galaxy, nomad, merge = _totals(batches)
+            steps |= {"batches": batches, "galaxy": galaxy, "nomad": nomad}
+            steps["merge"] = merge
+            failed = [batch for batch in batches if "failure" in batch]
+            if failed:
+                # The other batches are done; now the run fails and is reported.
+                first = failed[0]
+                self._step = first["failure"]["step"]
+                raise ApplicationError(
+                    f"{len(failed)} of {len(batches)} batches failed; "
+                    f"{first['folder']}: {first['failure']['error']}"
+                )
 
         self._step = "report"
         report, email = await self._report(run_dir, steps, data.user_id, retry_policy)
@@ -218,6 +222,7 @@ class ZenodoHarvestWorkflow:
             "work_list_records": planned.records,
             "work_list_files": planned.files,
             "skipped_files": planned.skipped,
+            "batches": steps.get("batches", []),
             "galaxy": galaxy,
             "nomad": nomad,
             "merge": merge,
@@ -225,30 +230,119 @@ class ZenodoHarvestWorkflow:
             "email": email,
         }
 
+    async def _batches(
+        self,
+        data: ZenodoHarvestWorkflowInput,
+        run_id: str,
+        run_dir: str,
+        record_ids: list[str],
+        retry_policy: RetryPolicy,
+    ) -> list[dict]:
+        """Send the records to Galaxy in batches, one after the other.
+
+        A failed batch does not stop the others. Once the project limit is
+        reached, the remaining batches are skipped for a later run.
+        """
+        size = data.records_per_work_list or len(record_ids)
+        groups = [record_ids[i : i + size] for i in range(0, len(record_ids), size)]
+        batches = []
+        for number, group in enumerate(groups, start=1):
+            folder = f"batch-{number:03d}"
+            if any(
+                "project_limit" in batch.get("nomad", {}).get("left_out", {}).values()
+                for batch in batches
+            ):
+                batches.append(
+                    {"folder": folder, "records": group, "skipped": "project_limit"}
+                )
+                continue
+            batches.append(
+                await self._batch(
+                    data,
+                    f"{run_id}-{folder}",
+                    run_dir=run_dir,
+                    folder=folder,
+                    record_ids=group,
+                    retry_policy=retry_policy,
+                )
+            )
+        return batches
+
+    async def _batch(  # noqa: PLR0913
+        self,
+        data: ZenodoHarvestWorkflowInput,
+        batch_id: str,
+        *,
+        run_dir: str,
+        folder: str,
+        record_ids: list[str],
+        retry_policy: RetryPolicy,
+    ) -> dict:
+        """One batch: its work list, Galaxy, the NOMAD projects and the state."""
+        summary: dict = {"folder": folder, "records": record_ids}
+        try:
+            self._step = "galaxy"
+            batch = await workflow.execute_activity(
+                prepare_batch,
+                PrepareBatchInput(
+                    run_dir=run_dir,
+                    folder=folder,
+                    user_id=data.user_id,
+                    run_id=batch_id,
+                    record_ids=record_ids,
+                    allow_duplicate_projects=data.allow_duplicate_projects,
+                ),
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=retry_policy,
+            )
+            galaxy, fetched, collection_id = await self._run_galaxy(
+                batch.batch_dir, batch.work_list_path, batch_id, data, retry_policy
+            )
+            summary["galaxy"] = galaxy
+            skip = _skip_reason(fetched, data.dry_run)
+            if skip:
+                summary["nomad"] = summary["merge"] = {
+                    "status": "skipped",
+                    "reason": skip,
+                }
+                return summary
+            self._step = "nomad"
+            summary["nomad"], projects = await self._create_projects(
+                batch.batch_dir,
+                batch.work_list_path,
+                fetched=fetched,
+                data=data,
+                collection_id=collection_id,
+                retry_policy=retry_policy,
+            )
+            self._step = "merge"
+            summary["merge"] = await self._merge_state(
+                fetched, projects, data.user_id, retry_policy
+            )
+        except (ActivityError, ApplicationError) as error:
+            if _is_stop(error):
+                raise
+            summary["failure"] = {"step": self._step, "error": _error_message(error)}
+        return summary
+
     async def _run_galaxy(  # noqa: PLR0913
         self,
         run_dir: str,
-        planned: BuildWorkListResult,
+        work_list_path: str,
         run_id: str,
         data: ZenodoHarvestWorkflowInput,
         retry_policy: RetryPolicy,
-    ) -> tuple[dict, FetchManifestResult | None, str | None]:
-        """Send the work list to Galaxy, wait for it and fetch the manifest.
+    ) -> tuple[dict, FetchManifestResult, str | None]:
+        """Send a work list to Galaxy, wait for it and fetch the manifest.
 
         Returns the step's summary, the fetched files and the ID of the
         `projects` collection.
         """
         galaxy_api_key = data.galaxy_api_key
-        if planned.records == 0:
-            return {"status": "skipped", "reason": "no_work"}, None, None
-        if not planned.galaxy_configured:
-            skipped = {"status": "skipped", "reason": "galaxy_not_configured"}
-            return skipped, None, None
-
         started = await workflow.execute_activity(
             run_galaxy,
             RunGalaxyInput(
-                work_list_path=planned.work_list_path,
+                work_list_path=work_list_path,
                 run_id=run_id,
                 galaxy_api_key=galaxy_api_key,
             ),
@@ -286,7 +380,7 @@ class ZenodoHarvestWorkflow:
             FetchManifestInput(
                 run_dir=run_dir,
                 user_id=data.user_id,
-                work_list_path=planned.work_list_path,
+                work_list_path=work_list_path,
                 manifest_dataset_id=polled.outputs[GALAXY_MANIFEST_OUTPUT],
                 results_dataset_id=polled.outputs.get(GALAXY_RESULTS_OUTPUT),
                 galaxy_api_key=galaxy_api_key,
@@ -312,7 +406,7 @@ class ZenodoHarvestWorkflow:
     async def _create_projects(  # noqa: PLR0913
         self,
         run_dir: str,
-        planned: BuildWorkListResult,
+        work_list_path: str,
         *,
         fetched: FetchManifestResult,
         data: ZenodoHarvestWorkflowInput,
@@ -333,7 +427,7 @@ class ZenodoHarvestWorkflow:
         projects = await workflow.execute_activity(
             create_projects,
             CreateProjectsInput(
-                work_list_path=planned.work_list_path,
+                work_list_path=work_list_path,
                 manifest_path=fetched.manifest_path,
                 results_path=fetched.results_path,
                 user_id=data.user_id,
@@ -410,6 +504,48 @@ def _error_message(error: ActivityError | ApplicationError) -> str:
     if isinstance(error, ActivityError) and error.cause is not None:
         return str(error.cause)
     return str(error)
+
+
+def _totals(batches: list[dict]) -> tuple[dict, dict, dict]:
+    """The Galaxy, NOMAD and state summaries of all batches, for the report.
+
+    Records of failed or skipped batches are left out of the NOMAD summary
+    with the reason, so the report says why they have no project.
+    """
+    ran = [b for b in batches if "galaxy" in b]
+    galaxy = {
+        "status": "failed" if any("failure" in b for b in batches) else "ok",
+        "batches": len(batches),
+        "failed": sum("failure" in b for b in batches),
+        "history_ids": [b["galaxy"]["history_id"] for b in ran],
+        "placeholder": bool(ran) and all(b["galaxy"]["placeholder"] for b in ran),
+    }
+    nomad_ok = [b["nomad"] for b in batches if b.get("nomad", {}).get("status") == "ok"]
+    merge_ok = [b["merge"] for b in batches if b.get("merge", {}).get("status") == "ok"]
+    left_out = {}
+    for batch in batches:
+        reason = batch.get("skipped") or (
+            "batch_failed" if "failure" in batch else None
+        )
+        left_out |= dict.fromkeys(batch["records"], reason) if reason else {}
+    if nomad_ok:
+        nomad = {
+            "status": "ok",
+            "upload_ids": {k: v for n in nomad_ok for k, v in n["upload_ids"].items()},
+            "created": [r for n in nomad_ok for r in n["created"]],
+            "left_out": {k: v for n in nomad_ok for k, v in n["left_out"].items()}
+            | left_out,
+        }
+    else:
+        reasons = [b["nomad"] for b in batches if "nomad" in b]
+        nomad = reasons[0] if reasons else {"status": "skipped", "reason": "no_batch"}
+    if merge_ok:
+        counts = [k for k in merge_ok[0] if k != "status"]
+        merge = {"status": "ok"} | {k: sum(m[k] for m in merge_ok) for k in counts}
+    else:
+        reasons = [b["merge"] for b in batches if "merge" in b]
+        merge = reasons[0] if reasons else {"status": "skipped", "reason": "no_batch"}
+    return galaxy, nomad, merge
 
 
 def _skip_reason(fetched: FetchManifestResult | None, dry_run: bool) -> str | None:

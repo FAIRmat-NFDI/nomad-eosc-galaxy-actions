@@ -26,8 +26,9 @@ from nomad_eosc_galaxy_actions.manifest import (
 )
 
 # Version of the report.json layout (keys and their meaning); 2 adds `failure`,
-# 3 adds duplicate raw files (with their `upload_id`) to `skipped_files`.
-REPORT_SCHEMA_VERSION = 3
+# 3 adds duplicate raw files (with their `upload_id`) to `skipped_files`,
+# 4 adds `batches`: one entry per work list sent to Galaxy.
+REPORT_SCHEMA_VERSION = 4
 
 
 def failed_files(manifest: Manifest, results: Results) -> list[dict[str, str]]:
@@ -96,6 +97,7 @@ def build_report(  # noqa: PLR0913
         "skipped_files": (skipped_files or {}).get("skipped", [])
         + (duplicates or {}).get("duplicates", []),
         "failed_files": failed,
+        "batches": steps.get("batches", []),
         "steps": steps,
     }
 
@@ -139,6 +141,24 @@ def _step(summary: dict[str, Any] | None) -> str:
     return str(summary.get("status"))
 
 
+def _galaxy_line(galaxy: dict[str, Any] | None) -> str:
+    if not galaxy or "batches" not in galaxy:
+        return _step(galaxy)
+    if galaxy["failed"]:
+        return f"{galaxy['failed']} of {galaxy['batches']} batches failed"
+    return f"ok: {galaxy['batches']} batches"
+
+
+def _batch_result(batch: dict[str, Any]) -> str:
+    """What happened to one batch, in a few words."""
+    if batch.get("skipped"):
+        return f"skipped ({batch['skipped']})"
+    if batch.get("failure"):
+        failure = batch["failure"]
+        return f"failed in {failure['step']}: {failure['error']}"
+    return _nomad_line(batch.get("nomad"))
+
+
 def _nomad_line(nomad: dict[str, Any] | None) -> str:
     if not nomad or nomad.get("status") != "ok":
         return _step(nomad)
@@ -174,7 +194,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{len(report['records'])} records; "
             f"{len(report['skipped_files'])} files skipped",
         ],
-        ["galaxy", "Galaxy", _step(steps.get("galaxy"))],
+        ["galaxy", "Galaxy", _galaxy_line(steps.get("galaxy"))],
         ["nomad", "NOMAD projects", _nomad_line(steps.get("nomad"))],
         ["merge", "State", _merge_line(steps.get("merge"))],
     ]
@@ -186,6 +206,15 @@ def render_markdown(report: dict[str, Any]) -> str:
     records = [
         [r["record_id"], r["title"], r["doi"], r["upload_id"] or r["left_out"]]
         for r in report["records"]
+    ]
+    batches = [
+        [
+            b["folder"],
+            ", ".join(b["records"]),
+            (b.get("galaxy") or {}).get("history_id"),
+            _batch_result(b),
+        ]
+        for b in report.get("batches", [])
     ]
     skipped = [[s["record_id"], s["key"], _reason(s)] for s in report["skipped_files"]]
     failed = [[f["record_id"], f["path"], f["error"]] for f in report["failed_files"]]
@@ -200,6 +229,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             else ""
         )
         + _table(["Step", "Result"], overview)
+        + "\n## Batches\n\n"
+        + _table(["Batch", "Records", "Galaxy history", "Result"], batches)
         + "\n## Records\n\n"
         + _table(["Record", "Title", "DOI", "NOMAD upload ID or reason"], records)
         + "\n## Skipped files\n\n"

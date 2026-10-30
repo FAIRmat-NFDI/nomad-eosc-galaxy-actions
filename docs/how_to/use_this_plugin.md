@@ -34,6 +34,7 @@ Start it from **Actions** in the main menu. No project needs to be selected.
 |---|---|
 | `dry_run` | Default on. Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. |
 | `max_records` | Process at most this many Zenodo records with new work. Empty means no limit. |
+| `records_per_work_list` | Default 1. Zenodo records sent to Galaxy together in one work list; each work list is one Galaxy run. Empty means all records in one work list. |
 | `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
 | `max_runs` | With `repeat_every_days`: stop after this many runs. Empty means until the Action is stopped. |
 | `allow_duplicate_projects` | Default off. On: also convert raw files that are already in one of your NOMAD projects. |
@@ -55,6 +56,18 @@ it is not converted again and the report lists it as `duplicate`, with the proje
 Other users' private projects do not count. Each project holds a `zenodo_harvest.json` file with
 its Zenodo record and the checksums of its raw and NeXus files.
 
+### Batches
+
+A run sends its records to Galaxy in batches of `records_per_work_list` records, one after the other.
+Each batch is one Galaxy run with its own work list and folder in the run folder (`batch-001`,
+`batch-002`, ...).
+
+- With 1 record per batch, a failing dataset does not hold up the others.
+- A failed batch does not stop the next ones; the run is marked failed at the end (see
+  [Failed runs](#failed-runs)).
+- Once the limit of 10 demo projects is reached, the remaining batches are skipped and handled by a
+  later run.
+
 ### Repeated runs
 
 - All runs of a series belong to one Action, which shows as `RUNNING` until the series ends.
@@ -63,14 +76,15 @@ its Zenodo record and the checksums of its raw and NeXus files.
 
 ### Failed runs
 
-A failed run fails the Action and **ends the series**. Its report is still written and emailed, with the
-failed step and the error; the email subject ends in "run failed". Fix the cause and start the Action again.
+A failed run fails the Action and **ends the series**. A run fails when a step fails, or when a batch
+failed after all batches ran. Its report is still written and emailed, with the failed step and the
+error; the email subject ends in "run failed". Fix the cause and start the Action again.
 Already processed files are not handled twice.
 
 ### Report
 
 Each run writes `report.json` and `report.md` into its run folder: the Zenodo search, the work list,
-Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed file with its reason,
+each batch, Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed file with its reason,
 duplicates included. It is emailed to the address of your NOMAD account.
 
 ### Worker settings

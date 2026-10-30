@@ -171,8 +171,8 @@ def test_markdown_of_a_dry_run_without_work():
     assert "| Galaxy | skipped (no_work) |" in text
     assert "| NOMAD projects | skipped (no_galaxy_run) |" in text
     assert "| State | not run |" in text
-    # Records, skipped files and failed files are empty.
-    assert text.count("None.") == 3  # noqa: PLR2004
+    # Batches, records, skipped files and failed files are empty.
+    assert text.count("None.") == 4  # noqa: PLR2004
 
 
 def test_failed_run():
