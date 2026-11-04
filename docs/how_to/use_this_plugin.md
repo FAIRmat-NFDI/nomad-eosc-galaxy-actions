@@ -20,11 +20,13 @@ Once `COMPLETED`, a new entry appears in the same upload: the original spectrum'
 ## Harvest SPM datasets from Zenodo
 
 The **ZenodoHarvestAction** finds openly licensed SPM (scanning probe microscopy, e.g. STM, STS and AFM)
-datasets on Zenodo, converts their raw files to NeXus on Galaxy and stores each Zenodo record version as a
-private NOMAD project. It remembers what it has processed, so the next run only handles new files.
+datasets on Zenodo, converts their raw files to NeXus on Galaxy and stores each Zenodo dataset as a
+private NOMAD project, with one folder per record version. It remembers what it has processed, so the
+next run only handles new files.
 
-The shipped harvest config starts with Nanonis `.sxm` files. For more SPM techniques and file formats,
-widen `zenodo_query` and `raw_extensions` in the harvest config.
+The form lists the raw file extensions to convert; by default, all that
+[pynxtools-spm](https://github.com/FAIRmat-NFDI/pynxtools-spm){:target="_blank" rel="noopener"} reads.
+For more SPM techniques, also widen `zenodo_query` in the harvest config.
 
 Start it from **Actions** in the main menu. No project needs to be selected.
 
@@ -33,11 +35,14 @@ Start it from **Actions** in the main menu. No project needs to be selected.
 | Field | Meaning |
 |---|---|
 | `dry_run` | Default on. Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. |
+| `galaxy_workflow_id` | ID of the harvest workflow in your Galaxy account. Empty uses the harvest config's `galaxy_workflow_id`. |
+| `raw_extensions` | Raw file extensions converted to NeXus. Default `.sxm`, `.dat`, `.sm4`, `.spm`, `.flt`. Written in any case, with or without the dot. |
 | `max_records` | Process at most this many Zenodo records with new work. Empty means no limit. |
 | `records_per_work_list` | Default 1. Zenodo records sent to Galaxy together in one work list; each work list is one Galaxy run. Empty means all records in one work list. |
 | `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
 | `max_runs` | With `repeat_every_days`: stop after this many runs. Empty means until the Action is stopped. |
 | `allow_duplicate_projects` | Default off. On: also convert raw files that are already in one of your NOMAD projects. |
+| `notify_email` | Optional. One more address that gets the run's report, besides your NOMAD account's address. |
 | `galaxy_api_key` | Your Galaxy API key. Empty uses the worker's `GALAXY_API_KEY`, if the administrators set one. |
 | `zenodo_token` | Optional Zenodo token for larger search pages. Empty uses the worker's `ZENODO_TOKEN`, if set. |
 
@@ -53,8 +58,49 @@ run one harvest at a time; a second one fails at once with the ID of the active 
 
 A raw file is recognized by its SHA-256 checksum. If it is already in one of your NOMAD projects,
 it is not converted again and the report lists it as `duplicate`, with the project's upload ID.
-Other users' private projects do not count. Each project holds a `zenodo_harvest.json` file with
-its Zenodo record and the checksums of its raw and NeXus files.
+Other users' private projects do not count. Raw files with an entry in NOMAD, including other users'
+published ones, are skipped as already known (see [State project](#state-project)). Each version
+folder holds a `zenodo_harvest.json` file
+with its Zenodo record and the checksums of its raw and NeXus files.
+
+### Project layout
+
+One project per Zenodo dataset, named `zenodo_<concept record ID>`. A new version of the dataset is
+added to the same project:
+
+```
+zenodo_22402764/
+  nomad.json                  links (DOIs) to all harvested versions; Zenodo IDs per entry
+  10.5281_zenodo.22402765/    one folder per version, named after its DOI
+    zenodo_harvest.json
+    <raw file stem>/          raw file, NeXus file and eln_data.yaml
+    Complementaries/          the dataset's other files (README, notes, ...)
+```
+
+### Zenodo IDs on each entry
+
+Each NeXus entry gets two searchable fields, set in `nomad.json`:
+
+| Field | Value |
+|---|---|
+| `external_id` | `zenodo:<concept record ID>:sha256:<raw file SHA-256>` |
+| `references` | concept DOI, version DOI and the raw file's Zenodo URL (`#md5=<MD5>` for a loose file) |
+
+Find an entry in the GUI by typing `external_id = <value>` in an app's search bar.
+
+### State project
+
+Your record of processed files (`state.json`) is kept in your private project
+`zenodo_harvest_state`. Each run reads it before planning and saves it after each batch, so the record
+survives a new worker or a lost artifacts folder.
+
+Before planning, each run also searches NOMAD for entries of the found Zenodo datasets (your own and
+published ones) and updates `state.json`:
+
+- A raw file with an entry in NOMAD is not downloaded or converted again.
+- A raw file whose entry was deleted in NOMAD is converted again by the next run.
+- Failed files and archives are known only from `state.json`. Without the state project, the next run
+  tries them again.
 
 ### Batches
 
@@ -65,8 +111,9 @@ Each batch is one Galaxy run with its own work list and folder in the run folder
 - With 1 record per batch, a failing dataset does not hold up the others.
 - A failed batch does not stop the next ones; the run is marked failed at the end (see
   [Failed runs](#failed-runs)).
-- Once the limit of 10 demo projects is reached, the remaining batches are skipped and handled by a
-  later run.
+- Once the limit of 9 unpublished harvest projects is reached, the remaining batches are skipped and
+  handled by a later run. NOMAD allows 10 unpublished projects per user; one stays free for the state
+  project.
 
 ### Repeated runs
 

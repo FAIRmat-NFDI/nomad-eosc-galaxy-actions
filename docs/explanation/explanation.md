@@ -87,7 +87,7 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 | File | Version constant | Written or read by |
 |---|---|---|
 | `harvest_config.json` | `HARVEST_CONFIG_SCHEMA_VERSION` | `load_harvest_config` |
-| `users/<user_id>/state.json` | `STATE_SCHEMA_VERSION` | `StateStore` |
+| `users/<user_id>/state.json` (working copy of the state project's `state.json`) | `STATE_SCHEMA_VERSION` | `StateStore`, `_pull_state`, `_push_state` |
 | `checksum_index.json` | `CHECKSUM_INDEX_SCHEMA_VERSION` | `ChecksumIndex` |
 
 **Contract with Galaxy, checked strictly.** The plugin and the Galaxy tools must agree on these; another version is rejected, not upgraded. Galaxy gets the work list of one batch; the manifest, results and project zips of that batch are stored in its `batch-NNN/` folder.
@@ -101,7 +101,7 @@ Every file the `zenodo_harvest` Action reads or writes carries a `schema_version
 
 | File | Version constant | Written or read by |
 |---|---|---|
-| `zenodo_harvest.json` | `HARVEST_METADATA_SCHEMA_VERSION` | `add_harvest_metadata` |
+| `<version folder>/zenodo_harvest.json` | `HARVEST_METADATA_SCHEMA_VERSION` | `add_harvest_metadata` |
 
 **Records of one run.** Read only within the same run; the version tells people and scripts which layout an old run folder has.
 

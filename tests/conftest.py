@@ -4,9 +4,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import io
 import json
 import socketserver
 import threading
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -256,16 +258,26 @@ def fake_galaxy():
 
 
 class FakeNomad(ThreadingHTTPServer):
-    """Local HTTP server answering NOMAD's `GET` and `POST /uploads` (API v1).
+    """Local HTTP server answering NOMAD's upload endpoints (API v1):
+    `GET`/`POST /uploads`, `GET /uploads/{id}` and `GET`/`PUT /uploads/{id}/raw/...`.
 
-    `projects` maps upload IDs to {"upload_name", "published", "content"};
-    `post_status` answers every POST with that HTTP status instead.
+    `projects` maps upload IDs to {"upload_name", "published", "content",
+    "files"}; zips sent with POST or PUT are extracted into "files".
+    `post_status` answers every upload POST with that HTTP status instead;
+    `busy_polls` is how many `GET /uploads/{id}` still report processing.
+
+    `POST /entries/query` searches `entries` (dicts with `external_id`,
+    `references`, `upload_id`, `published`) by `references:any`, with
+    `page_after_value` paging; `entry_queries` keeps each request body.
     """
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), _FakeNomadHandler)
         self.projects: dict[str, dict] = {}
+        self.entries: list[dict] = []
+        self.entry_queries: list[dict] = []
         self.post_status: int | None = None
+        self.busy_polls = 0
         self.requests: list[tuple[str, str, dict]] = []  # method, path, query
         self.auth_headers: list[str | None] = []
 
@@ -286,6 +298,18 @@ class _FakeNomadHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         query = self._request()
+        parts = urlparse(self.path).path.split("/")[4:]  # after /api/v1/uploads
+        if parts:
+            project = self.server.projects.get(parts[0])
+            if project is None:
+                self._send(404, {"detail": "unknown upload"})
+            elif len(parts) == 1:
+                busy = self.server.busy_polls > 0
+                self.server.busy_polls -= busy
+                self._send(200, {"data": {"process_running": busy}})
+            else:
+                self._send_file(project.get("files", {}).get("/".join(parts[2:])))
+            return
         unpublished = query.get("is_published") == "false"
         data = [
             {"upload_id": upload_id, "upload_name": p["upload_name"]}
@@ -297,6 +321,9 @@ class _FakeNomadHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         query = self._request()
         content = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if urlparse(self.path).path.endswith("/entries/query"):
+            self._query_entries(json.loads(content))
+            return
         if self.server.post_status:
             self._send(self.server.post_status, {"detail": "refused"})
             return
@@ -305,8 +332,67 @@ class _FakeNomadHandler(BaseHTTPRequestHandler):
             "upload_name": query.get("upload_name"),
             "published": False,
             "content": content,
+            "files": {},
         }
+        self._store(upload_id, "", query.get("file_name"), content)
         self._send(200, {"upload_id": upload_id, "data": {}})
+
+    def do_PUT(self):
+        query = self._request()
+        content = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        parts = urlparse(self.path).path.split("/")[4:]  # <id>, raw, folder...
+        folder = "/".join(p for p in parts[2:] if p)
+        self._store(parts[0], folder, query.get("file_name"), content)
+        self._send(200, {"upload_id": parts[0], "data": {}})
+
+    def _store(self, upload_id, folder, name, content):
+        """Keep a sent file; a zip is extracted, as NOMAD does."""
+        if not name:
+            return
+        files = self.server.projects[upload_id].setdefault("files", {})
+        prefix = f"{folder}/" if folder else ""
+        if name.endswith(".zip") and zipfile.is_zipfile(io.BytesIO(content)):
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                for member in archive.namelist():
+                    files[prefix + member] = archive.read(member)
+        else:
+            files[prefix + name] = content
+
+    def _query_entries(self, body: dict) -> None:
+        """Entries with any of the references, one page after `page_after_value`."""
+        self.server.entry_queries.append(body)
+        wanted = set(body["query"]["references:any"])
+        hits = [
+            entry
+            for entry in self.server.entries
+            if wanted.intersection(entry.get("references", []))
+        ]
+        pagination = body.get("pagination", {})
+        start = int(pagination.get("page_after_value") or 0)
+        end = start + pagination.get("page_size", 10)
+        include = body.get("required", {}).get("include")
+        page = [
+            {k: v for k, v in entry.items() if include is None or k in include}
+            for entry in hits[start:end]
+        ]
+        after = str(end) if end < len(hits) else None
+        self._send(
+            200,
+            {
+                "pagination": {"total": len(hits), "next_page_after_value": after},
+                "data": page,
+            },
+        )
+
+    def _send_file(self, content):
+        if content is None:
+            self._send(404, {"detail": "not found"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
 
     def _send(self, status, body):
         payload = json.dumps(body).encode()

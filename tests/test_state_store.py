@@ -9,9 +9,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from nomad_eosc_galaxy_actions.nomad_entries import FoundFile
 from nomad_eosc_galaxy_actions.state_store import (
     ACTIVE_RUN_FILE,
     STATE_SCHEMA_VERSION,
+    UPGRADES,
     NoTransactionError,
     RunLockedError,
     StateSchemaError,
@@ -99,6 +101,36 @@ def test_missing_upgrade_step_is_refused(tmp_path):
 
     with pytest.raises(StateSchemaError, match="no upgrade from state schema 1"):
         StateStore(path, schema_version=2, upgrades={})
+
+
+def test_upgrade_to_version_2_adds_the_nomad_fields(tmp_path):
+    path = tmp_path / "state.json"
+    file = {"status": "success", "path": "a.sxm"}
+    _write(
+        path,
+        {"schema_version": 1, "files": {CID: {"sha-a": file}}, "loose_md5": {}},
+    )
+
+    with StateStore(path, schema_version=2, upgrades=UPGRADES) as store:
+        assert store.snapshot()["files"][CID]["sha-a"] == file | {
+            "in_nomad": False,
+            "published": False,
+        }
+
+
+def test_transaction_without_a_change_writes_nothing(tmp_path):
+    path = tmp_path / "state.json"
+    with StateStore(path) as store:
+        with store.transaction():
+            store.record_loose_md5(CID, "md5-a", "sha-a")
+        before = path.stat().st_mtime_ns
+        with store.transaction():
+            store.record_loose_md5(CID, "md5-a", "sha-a")  # the same value again
+
+    assert path.stat().st_mtime_ns == before
+    with StateStore(tmp_path / "new.json") as store, store.transaction():
+        pass
+    assert not (tmp_path / "new.json").exists()
 
 
 def test_writes_need_a_transaction(store):
@@ -286,3 +318,114 @@ def test_release_keeps_another_runs_mark(tmp_path):
     assert release_run(tmp_path, "run-2") is False
     assert release_run(tmp_path, "run-1") is True
     acquire_run(tmp_path, "run-2", now=T0, max_age=DAY)  # free again
+
+
+# sync_from_nomad
+
+
+def _found(sha256="sha-a", **values) -> FoundFile:
+    """A raw file NOMAD has, in the user's upload `up-1` unless overridden."""
+    defaults = {"concept_record_id": CID, "sha256": sha256, "upload_id": "up-1"}
+    return FoundFile(**defaults | values)
+
+
+def test_sync_needs_a_transaction(store):
+    with pytest.raises(NoTransactionError):
+        store.sync_from_nomad([CID], [])
+
+
+def test_sync_with_nothing_found_changes_nothing(store):
+    with store.transaction():
+        counts = store.sync_from_nomad([CID], [])
+
+    assert counts == {"added": 0, "updated": 0, "removed": 0}
+    assert store.snapshot()["files"] == {}
+
+
+def test_sync_adds_files_from_nomad(store):
+    with store.transaction():
+        counts = store.sync_from_nomad([CID], [_found(md5="md5-a", published=True)])
+
+    assert counts == {"added": 1, "updated": 0, "removed": 0}
+    file = _files(store)["sha-a"]
+    assert (file["status"], file["upload_id"]) == ("success", "up-1")
+    assert (file["in_nomad"], file["published"]) == (True, True)
+    assert store.known_sha256(CID) == ["sha-a"]
+    assert store.is_loose_md5_known(CID, "md5-a")  # skipped before download
+
+
+def test_sync_marks_a_failed_file_as_success_and_keeps_its_details(store):
+    with store.transaction():
+        store.record_file(
+            CID, "sha-a", status="failed", path="d/a.sxm", archive_md5="zip-1"
+        )
+        counts = store.sync_from_nomad([CID], [_found()])
+
+    assert counts["updated"] == 1
+    file = _files(store)["sha-a"]
+    assert (file["status"], file["error"], file["in_nomad"]) == ("success", None, True)
+    assert (file["path"], file["archive_md5"]) == ("d/a.sxm", "zip-1")
+
+
+def test_sync_again_counts_only_changes(store):
+    with store.transaction():
+        store.sync_from_nomad([CID], [_found(md5="md5-a")])
+    with store.transaction():
+        same = store.sync_from_nomad([CID], [_found(md5="md5-a")])
+    with store.transaction():
+        published = store.sync_from_nomad([CID], [_found(md5="md5-a", published=True)])
+
+    assert same == {"added": 0, "updated": 0, "removed": 0}
+    assert published == {"added": 0, "updated": 1, "removed": 0}
+
+
+def test_sync_forgets_files_removed_from_nomad(store):
+    with store.transaction():
+        store.record_file(CID, "sha-a", status="success", archive_md5="zip-1")
+        store.set_archive_resolved(CID, "zip-1", True)
+        store.sync_from_nomad([CID], [_found(md5="md5-a")])
+    with store.transaction():
+        counts = store.sync_from_nomad([CID], [])  # deleted in NOMAD
+
+    assert counts == {"added": 0, "updated": 0, "removed": 1}
+    assert _files(store) == {}
+    assert not store.is_loose_md5_known(CID, "md5-a")
+    assert not store.is_archive_resolved(CID, "zip-1")  # downloaded again
+
+
+def test_sync_keeps_files_never_seen_in_nomad(store):
+    """Failures, and files converted before this check, are not in NOMAD."""
+    with store.transaction():
+        store.record_file(CID, "sha-ok", status="success")
+        store.record_file(CID, "sha-bad", status="failed")
+        counts = store.sync_from_nomad([CID], [])
+
+    assert counts["removed"] == 0
+    assert sorted(_files(store)) == ["sha-bad", "sha-ok"]
+
+
+def test_sync_touches_only_the_given_records(store):
+    with store.transaction():
+        store.sync_from_nomad(
+            [CID, "other"], [_found(), _found(concept_record_id="other")]
+        )
+    with store.transaction():
+        counts = store.sync_from_nomad(
+            ["other"], [_found(concept_record_id="other"), _found("sha-x")]
+        )
+
+    assert counts == {"added": 0, "updated": 0, "removed": 0}
+    assert sorted(_files(store)) == ["sha-a"]  # not removed, sha-x not added
+
+
+def test_record_file_keeps_the_nomad_fields(store):
+    with store.transaction():
+        store.sync_from_nomad([CID], [_found(published=True)])
+        store.record_file(CID, "sha-a", status="success", tool_version="2")
+
+    file = _files(store)["sha-a"]
+    assert (file["in_nomad"], file["published"], file["tool_version"]) == (
+        True,
+        True,
+        "2",
+    )

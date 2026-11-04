@@ -26,6 +26,7 @@ from nomad_eosc_galaxy_actions import (
     credentials,
     galaxy_client,
     mailer,
+    nomad_entries,
     nomad_projects,
     report,
     work_list,
@@ -37,11 +38,13 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.local_projects import (
+    LocalLookup,
     LocalProjects,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
     BuildWorkListResult,
+    ConfigOverrides,
     CreateProjectsInput,
     CreateProjectsResult,
     EmailReportInput,
@@ -97,6 +100,9 @@ SKIPPED_FILES_SCHEMA_VERSION = 1
 # checksum index of all users.
 STATE_DIR = "zenodo_harvest"
 STATE_FILE = "state.json"
+# NOMAD project of each user that holds the state file; the source of truth,
+# the local state file is only its working copy.
+STATE_PROJECT = "zenodo_harvest_state"
 CHECKSUM_INDEX_FILE = "checksum_index.json"
 # Longer than any run (Galaxy is polled for at most a day), so an older mark
 # of an active run is from a run that ended without removing it.
@@ -120,16 +126,30 @@ PAGE_SIZE_ANONYMOUS = 25
 PAGE_SIZE_AUTHENTICATED = 100
 
 
-def _harvest_config() -> HarvestConfig:
-    """Load the harvest config file named by the entry point (or the shipped one)."""
+def _harvest_config(overrides: ConfigOverrides | None = None) -> HarvestConfig:
+    """Load the harvest config file named by the entry point (or the shipped one),
+    with the form's values in place of the file's ones."""
     from nomad.config import config  # noqa: PLC0415
 
     entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
     try:
-        return load_harvest_config(entry_point.harvest_config_path)
+        harvest_config = load_harvest_config(entry_point.harvest_config_path)
     except (FileNotFoundError, HarvestConfigError) as error:
         # Loading again gives the same error, so do not retry.
         raise ApplicationError(str(error), non_retryable=True) from error
+    return apply_overrides(harvest_config, overrides)
+
+
+def apply_overrides(
+    harvest_config: HarvestConfig, overrides: ConfigOverrides | None
+) -> HarvestConfig:
+    """The harvest config with the form's non-empty values in place of its own."""
+    if overrides is None:
+        return harvest_config
+    update = overrides.model_dump(include=set(ConfigOverrides.model_fields))
+    return harvest_config.model_copy(
+        update={key: value for key, value in update.items() if value}
+    )
 
 
 def _secret(service: str, form_value, *, required: bool = True) -> str | None:
@@ -155,6 +175,34 @@ def _user_dir(harvest_config: HarvestConfig, user_id: str) -> Path:
 
 def _state_path(harvest_config: HarvestConfig, user_id: str) -> Path:
     return _user_dir(harvest_config, user_id) / STATE_FILE
+
+
+def _pull_state(harvest_config: HarvestConfig, user_id: str) -> None:
+    """Replace the local working copy with the state file of the state project.
+
+    Without a state project (first run), the local file is used as it is.
+    """
+    projects = _projects(harvest_config, user_id)
+    upload_id = projects.unpublished_projects().get(STATE_PROJECT)
+    content = upload_id and projects.read_file(upload_id, STATE_FILE)
+    if content:
+        path = _state_path(harvest_config, user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".pulled")
+        temp.write_bytes(content)
+        temp.replace(path)
+
+
+def _push_state(harvest_config: HarvestConfig, user_id: str) -> None:
+    """Write the local state file into the state project (created if missing)."""
+    path = _state_path(harvest_config, user_id)
+    if not path.is_file():
+        return
+    projects = _projects(harvest_config, user_id)
+    upload_id = projects.unpublished_projects().get(STATE_PROJECT)
+    if upload_id is None:
+        upload_id = projects.create(STATE_PROJECT, None)
+    projects.write_file(upload_id, STATE_FILE, path.read_bytes())
 
 
 def _checksum_index(harvest_config: HarvestConfig) -> checksum_index.ChecksumIndex:
@@ -212,7 +260,7 @@ def prepare_run(data: PrepareRunInput) -> PrepareRunResult:
     """
     from nomad.actions.manager import action_instance_artifacts_dir  # noqa: PLC0415
 
-    harvest_config = _harvest_config()
+    harvest_config = _harvest_config(data)
     try:
         acquire_run(
             _user_dir(harvest_config, data.user_id),
@@ -262,7 +310,7 @@ def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
     An optional Zenodo token (form field, else the worker's ZENODO_TOKEN)
     allows larger pages.
     """
-    harvest_config = _harvest_config()
+    harvest_config = _harvest_config(data)
     token = _secret("zenodo", data.zenodo_token, required=False)
     hits = zenodo_client.iter_search_hits(
         zenodo_client.make_session(token),
@@ -315,11 +363,13 @@ def write_work_list(
 def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
     """Compare this run's candidates with the user's state and write the work list.
 
-    Only reads the state; it is updated after Galaxy's manifest is complete.
+    First the state learns from NOMAD which raw files of the candidates are
+    already there (see `_sync_from_nomad`); a dry run does not save that in
+    the state project. Galaxy's outcome is merged after the manifest is complete.
     Unless duplicates are allowed, raw files already in one of the user's
     projects are sent to Galaxy as known, so they are not converted again.
     """
-    harvest_config = _harvest_config()
+    harvest_config = _harvest_config(data)
     settings = work_list.WorkListSettings.model_validate(
         harvest_config.model_dump(include=set(work_list.WorkListSettings.model_fields))
     )
@@ -333,6 +383,10 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
     in_projects = _in_projects(
         harvest_config, data.user_id, data.allow_duplicate_projects
     )
+    _pull_state(harvest_config, data.user_id)
+    synced = _sync_from_nomad(harvest_config, data.user_id, candidates)
+    if any(synced.values()) and not data.dry_run:
+        _push_state(harvest_config, data.user_id)
     with StateStore(_state_path(harvest_config, data.user_id)) as store:
         content, skipped = work_list.build_work_list(
             candidates,
@@ -358,6 +412,33 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
     )
 
 
+def _sync_from_nomad(
+    harvest_config: HarvestConfig,
+    user_id: str,
+    candidates: list[zenodo_client.ZenodoRecord],
+) -> dict[str, int]:
+    """Update the local state with the candidates' raw files that NOMAD has
+    (the user's own entries and published ones), searched by concept DOI."""
+    references = [
+        nomad_entries.record_reference(
+            harvest_config.zenodo_url, record.concept_record_id, record.concept_doi
+        )
+        for record in candidates
+    ]
+    found = nomad_entries.found_files(
+        _lookup(harvest_config, user_id).entries(references)
+    )
+    with (
+        StateStore(_state_path(harvest_config, user_id)) as store,
+        store.transaction(),
+    ):
+        synced = store.sync_from_nomad(
+            [record.concept_record_id for record in candidates], found
+        )
+    activity.logger.info("State synced with NOMAD: %s", synced)
+    return synced
+
+
 def _in_projects(harvest_config: HarvestConfig, user_id: str, allowed: bool):
     """Raw files in the user's projects; none when duplicates are allowed."""
     if allowed:
@@ -378,6 +459,7 @@ def prepare_batch(data: PrepareBatchInput) -> PrepareBatchResult:
     in_projects = _in_projects(
         harvest_config, data.user_id, data.allow_duplicate_projects
     )
+    _pull_state(harvest_config, data.user_id)
     with StateStore(_state_path(harvest_config, data.user_id)) as store:
         batch = work_list.batch_work_list(
             content,
@@ -400,7 +482,7 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     The API key comes from the form, else the worker's GALAXY_API_KEY; it is
     never written to the run's files, logs or Galaxy parameters.
     """
-    harvest_config = _harvest_config()
+    harvest_config = _harvest_config(data)
     result = galaxy_client.upload_and_invoke(
         api_key=_secret("galaxy", data.galaxy_api_key),
         workflow_id=harvest_config.galaxy_workflow_id,
@@ -530,29 +612,44 @@ def fetch_projects(data: FetchProjectsInput) -> FetchProjectsResult:
     return FetchProjectsResult(zip_paths=zip_paths)
 
 
-def _projects(harvest_config: HarvestConfig, user_id: str) -> nomad_projects.Projects:
-    """The NOMAD in `nomad_url` (with the worker's NOMAD_PAT), else the local one.
+def _pat() -> str:
+    """The worker's NOMAD_PAT, needed when `nomad_url` is set.
 
     A missing PAT is an error, not a fallback: projects must never end up
     in another NOMAD than the configured one.
     """
-    if not harvest_config.nomad_url:
-        return LocalProjects(user_id)
     pat = os.environ.get("NOMAD_PAT")
     if not pat:
         raise ApplicationError(
             "nomad_url is set, but the worker has no NOMAD_PAT environment variable",
             non_retryable=True,
         )
-    return nomad_projects.RestProjects(harvest_config.nomad_url, pat)
+    return pat
+
+
+def _projects(harvest_config: HarvestConfig, user_id: str) -> nomad_projects.Projects:
+    """The NOMAD in `nomad_url` (with the worker's NOMAD_PAT), else the local one."""
+    if not harvest_config.nomad_url:
+        return LocalProjects(user_id)
+    return nomad_projects.RestProjects(harvest_config.nomad_url, _pat())
+
+
+def _lookup(harvest_config: HarvestConfig, user_id: str) -> nomad_entries.EntryLookup:
+    """Entry search in the same NOMAD as `_projects`."""
+    if not harvest_config.nomad_url:
+        return LocalLookup(user_id)
+    return nomad_entries.RestLookup(harvest_config.nomad_url, _pat())
 
 
 @activity.defn
 def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
-    """Create one private NOMAD project per record version zip.
+    """Add each record version zip to the private NOMAD project of its concept
+    record (`zenodo_<concept record ID>`), created on first use.
 
-    Each zip gets `nomad.json` (references) and `zenodo_harvest.json` (record
-    and checksums). Retry-safe: an existing project with the same name is reused.
+    Each zip gets `nomad.json` (references of all versions and, per NeXus
+    entry, its `external_id` and references; see `nomad_entries`) and
+    `<version folder>/zenodo_harvest.json` (record and checksums). Retry-safe:
+    the same zip again only replaces the same files.
     Once the demo project limit is reached, the remaining records are left
     out (reason `project_limit`) and handled by a later run.
     """
@@ -578,18 +675,17 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
         if result.left_out:  # the limit was reached for an earlier record
             result.left_out[record_id] = "project_limit"
             continue
-        doi = record.get("version_doi")
-        reference = (
-            f"https://doi.org/{doi}"
-            if doi
-            else f"{harvest_config.zenodo_url.rstrip('/')}/records/{record_id}"
+        reference = nomad_entries.record_reference(
+            harvest_config.zenodo_url, record_id, record.get("version_doi")
         )
-        nomad_projects.add_project_metadata(zip_path, [reference])
+        entries = nomad_entries.entry_metadata(
+            record, manifest, results, harvest_config.zenodo_url
+        )
         nomad_projects.add_harvest_metadata(zip_path, record, manifest, results)
-        name = nomad_projects.project_name(record["concept_record_id"], record_id)
+        name = nomad_projects.project_name(record["concept_record_id"])
         try:
             upload_id, created = nomad_projects.create_project(
-                projects, name, Path(zip_path)
+                projects, name, Path(zip_path), [reference], entries
             )
         except nomad_projects.ProjectLimitReached as error:
             activity.logger.warning("%s", error)
@@ -610,7 +706,8 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
 @activity.defn
 def merge_state(data: MergeStateInput) -> MergeSummary:
     """Merge Galaxy's manifest and results into the user's state (all or nothing),
-    then add the converted raw files to the checksum index."""
+    save it in the state project, then add the converted raw files to the
+    checksum index."""
     harvest_config = _harvest_config()
     try:
         manifest = Manifest.model_validate_json(
@@ -619,10 +716,12 @@ def merge_state(data: MergeStateInput) -> MergeSummary:
         results = Results.model_validate_json(
             Path(data.results_path).read_text(encoding="utf-8")
         )
+        _pull_state(harvest_config, data.user_id)
         with StateStore(_state_path(harvest_config, data.user_id)) as store:
             summary = merge_manifest(
                 store, manifest, results, data.upload_ids, data.left_out
             )
+        _push_state(harvest_config, data.user_id)
         converted = checksum_index.converted_files(
             manifest, results, data.upload_ids, data.user_id
         )
@@ -711,6 +810,11 @@ def write_report(data: WriteReportInput) -> WriteReportResult:
     )
 
 
+def recipients(user_email: str | None, notify_email: str | None) -> str:
+    """The `To` header: the user's address and the extra one, without repeats."""
+    return ", ".join(dict.fromkeys(a for a in (user_email, notify_email) if a))
+
+
 def _user_email(user_id: str) -> str | None:
     """Email address of a NOMAD user (needs NOMAD's user management)."""
     from nomad import datamodel  # noqa: PLC0415
@@ -721,7 +825,8 @@ def _user_email(user_id: str) -> str | None:
 
 @activity.defn
 def email_report(data: EmailReportInput) -> EmailReportResult:
-    """Email `report.md` (with `report.json` attached) to the run's user.
+    """Email `report.md` (with `report.json` attached) to the run's user and,
+    if given, to the form's extra address.
 
     Also sent for a failed run; its subject then ends in "run failed".
 
@@ -735,13 +840,13 @@ def email_report(data: EmailReportInput) -> EmailReportResult:
         raise ApplicationError(str(error), non_retryable=True) from error
     if settings is None:
         return EmailReportResult(sent=False, reason="smtp_not_configured")
-    address = _user_email(data.user_id)
-    if not address:
+    to = recipients(_user_email(data.user_id), data.notify_email)
+    if not to:
         return EmailReportResult(sent=False, reason="no_email_address")
     content = json.loads(Path(data.report_path).read_text(encoding="utf-8"))
     message = mailer.build_message(
         settings.sender,
-        address,
+        to,
         subject=report.email_subject(content),
         body=Path(data.markdown_path).read_text(encoding="utf-8"),
         attachments=[Path(data.report_path)],

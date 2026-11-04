@@ -14,6 +14,11 @@ keyed by Zenodo's concept record ID, which groups every version of a record:
 - `archives`: archives by Zenodo MD5. `resolved` means every raw file inside
   has a final status, so the archive is not downloaded again.
 
+NOMAD is the source of truth for converted files: before each run,
+`sync_from_nomad()` marks the files NOMAD has as `success` (with `in_nomad`
+and `published`) and forgets those removed from NOMAD. Failures and archives
+are known only here.
+
 Writes run in `transaction()`: the file is locked, re-read, changed and saved
 atomically (temporary file, then rename), so a crash never leaves half a
 file. When the file grows too large for JSON, only this module changes.
@@ -28,7 +33,7 @@ import fcntl
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,9 +41,20 @@ from typing import Any
 
 # Version of the file layout (keys and their meaning). When it changes: bump
 # it and add the function that turns version n into n + 1 to UPGRADES[n].
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 Upgrade = Callable[[dict[str, Any]], dict[str, Any]]
-UPGRADES: dict[int, Upgrade] = {}
+
+
+def _add_nomad_fields(state: dict[str, Any]) -> dict[str, Any]:
+    """Version 1 → 2: each file gets `in_nomad` and `published` (not yet known)."""
+    for files in state.get("files", {}).values():
+        for file in files.values():
+            file.setdefault("in_nomad", False)
+            file.setdefault("published", False)
+    return state
+
+
+UPGRADES: dict[int, Upgrade] = {1: _add_nomad_fields}
 
 # Statuses that mean "done, do not process again". `retry` is not final.
 FINAL_STATUSES = ("success", "failed")
@@ -175,7 +191,8 @@ class StateStore:
         """Group writes: all of them are saved, or none (on an exception).
 
         Holds the file lock and starts from the file's latest content, so the
-        changes of a parallel writer are not lost.
+        changes of a parallel writer are not lost. Without a change the file
+        is not written.
         """
         if self._in_transaction:
             raise NoTransactionError("transactions cannot be nested")
@@ -186,7 +203,8 @@ class StateStore:
                 self._state = copy.deepcopy(before)
                 try:
                     yield
-                    write_atomically(self._path, self._state)
+                    if self._state != before:
+                        write_atomically(self._path, self._state)
                 except BaseException:
                     # The file is unchanged, so the store goes back to it too.
                     self._state = before
@@ -235,19 +253,99 @@ class StateStore:
 
         `version_doi` keeps the first version the file was seen in.
         `archive_md5` is the archive it came from (None for a loose file).
+        `in_nomad` and `published` are kept; only `sync_from_nomad` sets them.
         """
         files = self._map("files", concept_record_id)
-        first_doi = files.get(sha256, {}).get("version_doi")
+        old = files.get(sha256, {})
         files[sha256] = {
             "status": status,
             "path": path,
-            "version_doi": first_doi or version_doi,
+            "version_doi": old.get("version_doi") or version_doi,
             "tool_version": tool_version,
             "upload_id": upload_id,
             "error": error,
             "updated_at": _now(),
             "archive_md5": archive_md5,
+            "in_nomad": old.get("in_nomad", False),
+            "published": old.get("published", False),
         }
+
+    def sync_from_nomad(
+        self, concept_record_ids: Iterable[str], found: Iterable[Any]
+    ) -> dict[str, int]:
+        """Make the files of these concept records match what NOMAD has.
+
+        `found` holds `nomad_entries.FoundFile`s. Each becomes `success`, with
+        `in_nomad`, `published` and its upload; a loose file's MD5 is kept.
+        A file seen in NOMAD before but missing now was removed there: it is
+        forgotten, so a later run converts it again. Files never seen in NOMAD
+        (e.g. from before this check, or failures) are left as they are.
+
+        Returns the counts `added`, `updated` and `removed`; files that already
+        match NOMAD are not counted (all zero: nothing changed).
+        """
+        if not self._in_transaction:
+            raise NoTransactionError("writes must run inside transaction()")
+        counts = {"added": 0, "updated": 0, "removed": 0}
+        wanted = set(concept_record_ids)
+        seen: dict[str, set[str]] = {cid: set() for cid in wanted}
+        for file in found:
+            cid = file.concept_record_id
+            if cid not in wanted:
+                continue
+            seen[cid].add(file.sha256)
+            files = self._map("files", cid)
+            known_md5 = self._state["loose_md5"].get(cid, {})
+            new_md5 = bool(file.md5) and known_md5.get(file.md5) != file.sha256
+            if new_md5:
+                self._map("loose_md5", cid)[file.md5] = file.sha256
+            old = files.get(file.sha256, {})
+            if (
+                not new_md5
+                and old.get("in_nomad")
+                and (
+                    old.get("status"),
+                    old.get("upload_id"),
+                    old.get("published"),
+                )
+                == ("success", file.upload_id, file.published)
+            ):
+                continue
+            counts["updated" if old else "added"] += 1
+            files[file.sha256] = {
+                "status": "success",
+                "path": old.get("path"),
+                "version_doi": old.get("version_doi"),
+                "tool_version": old.get("tool_version"),
+                "upload_id": file.upload_id,
+                "error": None,
+                "updated_at": _now(),
+                "archive_md5": old.get("archive_md5"),
+                "in_nomad": True,
+                "published": file.published,
+            }
+        for cid in wanted:
+            files = self._state["files"].get(cid, {})
+            for sha256 in [
+                sha256
+                for sha256, file in files.items()
+                if file.get("in_nomad") and sha256 not in seen[cid]
+            ]:
+                self._forget(cid, sha256)
+                counts["removed"] += 1
+        return counts
+
+    def _forget(self, concept_record_id: str, sha256: str) -> None:
+        """Remove a file; its archive becomes unresolved, its loose MD5 unknown."""
+        file = self._state["files"][concept_record_id].pop(sha256)
+        archive = (
+            self._state["archives"].get(concept_record_id, {}).get(file["archive_md5"])
+        )
+        if archive:
+            archive |= {"resolved": False, "updated_at": _now()}
+        loose = self._state["loose_md5"].get(concept_record_id, {})
+        for md5 in [md5 for md5, known in loose.items() if known == sha256]:
+            del loose[md5]
 
     def record_loose_md5(self, concept_record_id: str, md5: str, sha256: str) -> None:
         self._map("loose_md5", concept_record_id)[md5] = sha256

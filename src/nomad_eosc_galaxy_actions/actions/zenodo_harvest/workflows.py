@@ -122,6 +122,7 @@ class ZenodoHarvestWorkflow:
                 started_at=workflow.now().isoformat(),
                 dry_run=data.dry_run,
                 max_records=data.max_records,
+                **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=retry_policy,
@@ -144,7 +145,7 @@ class ZenodoHarvestWorkflow:
             # Report the failure, then fail the run as before.
             steps["failure"] = {"step": self._step, "error": _error_message(error)}
             try:
-                await self._report(prepared.run_dir, steps, data.user_id, retry_policy)
+                await self._report(prepared.run_dir, steps, data, retry_policy)
             except ActivityError as report_error:
                 workflow.logger.warning(
                     "No report for the failed run: %s", _error_message(report_error)
@@ -164,7 +165,11 @@ class ZenodoHarvestWorkflow:
         self._step = "zenodo_search"
         searched = await workflow.execute_activity(
             search_zenodo,
-            SearchZenodoInput(run_dir=run_dir, zenodo_token=data.zenodo_token),
+            SearchZenodoInput(
+                run_dir=run_dir,
+                zenodo_token=data.zenodo_token,
+                **data.config_overrides(),
+            ),
             start_to_close_timeout=timedelta(minutes=15),
             retry_policy=retry_policy,
         )
@@ -178,6 +183,8 @@ class ZenodoHarvestWorkflow:
                 run_id=run_id,
                 max_records=data.max_records,
                 allow_duplicate_projects=data.allow_duplicate_projects,
+                dry_run=data.dry_run,
+                **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
@@ -212,7 +219,7 @@ class ZenodoHarvestWorkflow:
                 )
 
         self._step = "report"
-        report, email = await self._report(run_dir, steps, data.user_id, retry_policy)
+        report, email = await self._report(run_dir, steps, data, retry_policy)
         return {
             "run_id": run_id,
             "run_dir": run_dir,
@@ -345,6 +352,7 @@ class ZenodoHarvestWorkflow:
                 work_list_path=work_list_path,
                 run_id=run_id,
                 galaxy_api_key=galaxy_api_key,
+                **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
@@ -467,7 +475,11 @@ class ZenodoHarvestWorkflow:
         return {"status": "ok", **merged.model_dump()}
 
     async def _report(
-        self, run_dir: str, steps: dict, user_id: str, retry_policy: RetryPolicy
+        self,
+        run_dir: str,
+        steps: dict,
+        data: ZenodoHarvestWorkflowInput,
+        retry_policy: RetryPolicy,
     ) -> tuple[str, dict]:
         """Write the report and email it; a failed email does not fail the run."""
         written = await workflow.execute_activity(
@@ -482,7 +494,8 @@ class ZenodoHarvestWorkflow:
                 EmailReportInput(
                     report_path=written.report_path,
                     markdown_path=written.markdown_path,
-                    user_id=user_id,
+                    user_id=data.user_id,
+                    notify_email=data.notify_email,
                 ),
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=retry_policy,

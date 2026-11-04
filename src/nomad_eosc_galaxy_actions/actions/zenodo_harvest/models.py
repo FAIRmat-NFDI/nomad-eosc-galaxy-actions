@@ -7,17 +7,40 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr, field_serializer
+from pydantic import BaseModel, Field, SecretStr, field_serializer, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from nomad_eosc_galaxy_actions.credentials import reveal
+
+# Raw file extensions that pynxtools-spm can read (pynxtools_spm/reader.py).
+DEFAULT_RAW_EXTENSIONS = [".sxm", ".dat", ".sm4", ".spm", ".flt"]
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+def _normalize_extensions(values: list[str] | None) -> list[str] | None:
+    """`SXM`, `.sxm ` → `.sxm`; empty entries and repeats are dropped."""
+    if values is None:
+        return None
+    normalized = [f".{v.strip().lstrip('.').lower()}" for v in values if v.strip(" .")]
+    return list(dict.fromkeys(normalized))
+
+
+class ConfigOverrides(BaseModel):
+    """Form values that replace the harvest config's ones for one run."""
+
+    galaxy_workflow_id: str | None = Field(
+        None, description="Replaces the config's galaxy_workflow_id."
+    )
+    raw_extensions: list[str] | None = Field(
+        None, description="Replaces the config's raw_extensions."
+    )
 
 
 class ZenodoHarvestWorkflowInput(BaseModel):
     """Input of one harvest run. NOMAD renders the `/actions` form from it.
 
     No `upload_id` is needed: a harvest run does not work inside an existing
-    project; it creates its own projects, one per Zenodo record version.
+    project; it creates its own projects, one per Zenodo concept record.
     """
 
     user_id: str = Field(
@@ -25,63 +48,89 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     dry_run: bool = Field(
         True,
-        description="Search, plan and convert, but create no NOMAD projects and "
-        "leave the record of processed files unchanged, so a later real run "
-        "handles the same files.",
+        description="Convert, but create no NOMAD projects and keep the state "
+        "unchanged. Example: on for a first test.",
+    )
+    galaxy_workflow_id: str | None = Field(
+        None,
+        description="ID of the harvest workflow in your Galaxy account; empty uses "
+        "the harvest config. Example: a82009b719022643",
+    )
+    raw_extensions: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_RAW_EXTENSIONS),
+        description="Raw file extensions converted to NeXus. Example: .sxm",
     )
     max_records: int | None = Field(
         None,
         ge=1,
-        description="Process at most this many Zenodo records with new work in "
-        "this run (useful for small test runs); already handled records do not "
-        "count. Empty means no limit.",
+        description="At most this many Zenodo records with new work; empty means "
+        "no limit. Example: 2",
     )
     records_per_work_list: int | None = Field(
         1,
         ge=1,
-        description="Zenodo records (datasets) sent to Galaxy together in one work "
-        "list; each work list is one Galaxy run. 1 isolates the datasets, so one "
-        "failing dataset does not hold up the others. Empty means all records in "
-        "one work list.",
+        description="Zenodo records per Galaxy run; empty sends all in one run. "
+        "Example: 1",
     )
     repeat_every_days: int | None = Field(
         None,
         ge=1,
-        description="Start a new run this many days after the previous one "
-        "started (7 = weekly), until the Action is stopped. Empty means one run. "
-        "A failed run stops the Action and the repeats; its report is still "
-        "emailed. Start the Action again to resume.",
+        description="Repeat the run every N days until stopped; empty runs once. "
+        "Example: 7",
     )
     max_runs: int | None = Field(
         None,
         ge=1,
-        description="With repeat_every_days: stop after this many runs. Empty "
-        "means until the Action is stopped.",
+        description="With repeat_every_days: stop after N runs. Example: 4",
     )
     allow_duplicate_projects: bool = Field(
         False,
-        description="Also convert raw files that are already in one of your NOMAD "
-        "projects (same SHA-256 checksum). Off: such files are skipped and listed "
-        "as duplicate in the report.",
+        description="Also convert raw files already in one of your NOMAD projects. "
+        "Example: off",
+    )
+    notify_email: str | None = Field(
+        None,
+        pattern=EMAIL_PATTERN,
+        description="Extra address that also gets the run report. "
+        "Example: name@example.org",
     )
     galaxy_api_key: SecretStr | None = Field(
         None,
-        description="Your Galaxy API key (in Galaxy: User > Preferences > Manage "
-        "API Key). Empty uses the worker's GALAXY_API_KEY, if the administrators "
-        "set one.",
+        description="Your Galaxy API key (User > Preferences > Manage API Key); "
+        "empty uses the worker's GALAXY_API_KEY.",
     )
     zenodo_token: SecretStr | None = Field(
         None,
-        description="Optional Zenodo personal access token; allows larger search "
-        "pages. Empty uses the worker's ZENODO_TOKEN, if set.",
+        description="Optional Zenodo token for larger search pages; empty uses "
+        "the worker's ZENODO_TOKEN.",
     )
     # Set by the workflow when it continues as new; SkipJsonSchema keeps it
     # out of the JSON schema, so the form does not show it.
     run_number: SkipJsonSchema[int] = 1
 
+    @field_validator("raw_extensions")
+    @classmethod
+    def _check_extensions(cls, value: list[str]) -> list[str]:
+        value = _normalize_extensions(value)
+        if not value:
+            raise ValueError("give at least one raw file extension")
+        return value
+
+    @field_validator("galaxy_workflow_id", "notify_email", mode="before")
+    @classmethod
+    def _empty_is_none(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
     @field_serializer("galaxy_api_key", "zenodo_token", when_used="json")
     def _dump_secret(self, value: SecretStr | None) -> str | None:
         return reveal(value)
+
+    def config_overrides(self) -> dict[str, Any]:
+        """Keyword arguments for the activity inputs based on ConfigOverrides."""
+        return {
+            "galaxy_workflow_id": self.galaxy_workflow_id,
+            "raw_extensions": self.raw_extensions,
+        }
 
 
 class GalaxyKeyInput(BaseModel):
@@ -96,7 +145,7 @@ class GalaxyKeyInput(BaseModel):
         return reveal(value)
 
 
-class PrepareRunInput(BaseModel):
+class PrepareRunInput(ConfigOverrides):
     """Input for the activity that sets up the run's artifacts folder."""
 
     action_instance_id: str
@@ -121,7 +170,7 @@ class PrepareRunResult(BaseModel):
     )
 
 
-class SearchZenodoInput(BaseModel):
+class SearchZenodoInput(ConfigOverrides):
     """Input for the activity that searches Zenodo."""
 
     run_dir: str
@@ -143,7 +192,7 @@ class SearchZenodoResult(BaseModel):
     rejected: int
 
 
-class BuildWorkListInput(BaseModel):
+class BuildWorkListInput(ConfigOverrides):
     """Input for the activity that compares the candidates with the state."""
 
     run_dir: str
@@ -153,6 +202,7 @@ class BuildWorkListInput(BaseModel):
         None, description="Limit for records with work; empty means no limit."
     )
     allow_duplicate_projects: bool = False
+    dry_run: bool = Field(False, description="Do not save the state synced from NOMAD.")
 
 
 class BuildWorkListResult(BaseModel):
@@ -162,7 +212,8 @@ class BuildWorkListResult(BaseModel):
     files: int = Field(..., description="Files to download, context files included.")
     skipped: int = Field(..., description="Files not downloaded, with a reason.")
     galaxy_configured: bool = Field(
-        ..., description="A Galaxy workflow ID is set in the harvest config."
+        ...,
+        description="A Galaxy workflow ID is set in the form or the harvest config.",
     )
 
 
@@ -182,7 +233,7 @@ class PrepareBatchResult(BaseModel):
     work_list_path: str
 
 
-class RunGalaxyInput(GalaxyKeyInput):
+class RunGalaxyInput(GalaxyKeyInput, ConfigOverrides):
     """Input for the activity that sends the work list to Galaxy."""
 
     work_list_path: str
@@ -305,6 +356,7 @@ class EmailReportInput(BaseModel):
     report_path: str
     markdown_path: str
     user_id: str = Field(..., description="Recipient: the user who started the run.")
+    notify_email: str | None = Field(None, description="One more recipient.")
 
 
 class EmailReportResult(BaseModel):
