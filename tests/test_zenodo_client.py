@@ -189,6 +189,50 @@ def test_search_raises_on_client_error(fake_zenodo):
         )
 
 
+# fetch_records (against a local fake Zenodo server)
+
+
+def test_fetch_records_by_record_and_concept_id(fake_zenodo, zenodo_hits):
+    first, second = zenodo_hits[0], zenodo_hits[1]
+    fake_zenodo.records = {str(first["id"]): first, str(second["id"]): second}
+    fake_zenodo.redirects = {"999": str(second["id"])}  # concept ID → latest version
+
+    hits, missing = zenodo_client.fetch_records(
+        _session(),
+        [str(first["id"]), "999", str(first["id"])],
+        zenodo_url=fake_zenodo.url,
+    )
+
+    assert [h["id"] for h in hits] == [first["id"], second["id"]]  # no repeat
+    assert missing == []
+
+
+def test_fetch_records_rejects_unknown_records(fake_zenodo):
+    hits, missing = zenodo_client.fetch_records(
+        _session(), ["404"], zenodo_url=fake_zenodo.url
+    )
+
+    assert hits == []
+    assert missing == [zenodo_client.Rejection(record_id="404", reason="not_found")]
+
+
+def test_fetch_records_without_ids_sends_nothing(fake_zenodo):
+    assert zenodo_client.fetch_records(_session(), [], zenodo_url=fake_zenodo.url) == (
+        [],
+        [],
+    )
+    assert fake_zenodo.requests == []
+
+
+def test_fetch_records_raises_on_server_errors(fake_zenodo):
+    fake_zenodo.failures = [500, 500, 500]
+
+    with pytest.raises(requests.RequestException):
+        zenodo_client.fetch_records(
+            _session(retries=2), ["1"], zenodo_url=fake_zenodo.url
+        )
+
+
 def test_make_session_sets_token_header():
     assert _session().headers.get("Authorization") is None
     session = zenodo_client.make_session("secret")

@@ -72,8 +72,29 @@ def test_raw_extensions_need_one_extension(given):
 
 
 def test_empty_text_fields_mean_not_set():
-    form = _form(galaxy_workflow_id="  ", notify_email="")
-    assert (form.galaxy_workflow_id, form.notify_email) == (None, None)
+    form = _form(galaxy_workflow_id="  ", zenodo_query=" ", notify_email="")
+    assert (form.galaxy_workflow_id, form.zenodo_query, form.notify_email) == (
+        None,
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ([], []),
+        ([" 15147607 ", "", "15147606", "15147607"], ["15147607", "15147606"]),
+    ],
+)
+def test_record_ids_are_trimmed(given, expected):
+    assert _form(zenodo_record_ids=given).zenodo_record_ids == expected
+
+
+@pytest.mark.parametrize("given", [["10.5281/zenodo.1"], ["abc"], ["1", "-2"]])
+def test_record_ids_must_be_numbers(given):
+    with pytest.raises(ValidationError, match="record IDs are numbers"):
+        _form(zenodo_record_ids=given)
 
 
 def test_workflow_id_is_trimmed():
@@ -110,7 +131,9 @@ def _config():
 
 
 def test_form_values_replace_the_config():
-    form = _form(galaxy_workflow_id="wf-form", raw_extensions=[".dat"])
+    form = _form(
+        galaxy_workflow_id="wf-form", raw_extensions=[".dat"], zenodo_query="AFM"
+    )
     data = BuildWorkListInput(
         run_dir="r", user_id="u1", run_id="run-1", **form.config_overrides()
     )
@@ -118,7 +141,8 @@ def test_form_values_replace_the_config():
     config = apply_overrides(_config(), data)
 
     assert (config.galaxy_workflow_id, config.raw_extensions) == ("wf-form", [".dat"])
-    assert config.zenodo_query == _config().zenodo_query  # the rest is unchanged
+    assert config.zenodo_query == "AFM"
+    assert config.licenses == _config().licenses  # the rest is unchanged
 
 
 def test_empty_form_values_keep_the_config():

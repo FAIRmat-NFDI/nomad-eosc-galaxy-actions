@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pydantic models for the zenodo-harvest action's workflow and activities."""
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, SecretStr, field_serializer, field_validator
@@ -15,6 +16,7 @@ from nomad_eosc_galaxy_actions.credentials import reveal
 # Raw file extensions that pynxtools-spm can read (pynxtools_spm/reader.py).
 DEFAULT_RAW_EXTENSIONS = [".sxm", ".dat", ".sm4", ".spm", ".flt"]
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+RECORD_ID_PATTERN = r"^\d+$"
 
 
 def _normalize_extensions(values: list[str] | None) -> list[str] | None:
@@ -33,6 +35,9 @@ class ConfigOverrides(BaseModel):
     )
     raw_extensions: list[str] | None = Field(
         None, description="Replaces the config's raw_extensions."
+    )
+    zenodo_query: str | None = Field(
+        None, description="Replaces the config's zenodo_query."
     )
 
 
@@ -56,6 +61,16 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         description="ID of the harvest workflow in your Galaxy account; empty uses "
         "the harvest config. Example: a82009b719022643",
     )
+    zenodo_query: str | None = Field(
+        None,
+        description="Zenodo search query; empty uses the harvest config. "
+        "Example: STM AND resource_type.type:dataset",
+    )
+    zenodo_record_ids: list[str] = Field(
+        default_factory=list,
+        description="Only these Zenodo records (record or concept IDs), in place "
+        "of the query. Example: 15147607",
+    )
     raw_extensions: list[str] = Field(
         default_factory=lambda: list(DEFAULT_RAW_EXTENSIONS),
         description="Raw file extensions converted to NeXus. Example: .sxm",
@@ -63,14 +78,14 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     max_records: int | None = Field(
         None,
         ge=1,
-        description="At most this many Zenodo records with new work; empty means "
-        "no limit. Example: 2",
+        description="At most this many Zenodo records with new work; empty: no "
+        "limit. Example: 6 with records_per_work_list 2 → 3 Galaxy runs",
     )
     records_per_work_list: int | None = Field(
         1,
         ge=1,
         description="Zenodo records per Galaxy run; empty sends all in one run. "
-        "Example: 1",
+        "Example: 2 with max_records 6 → 3 Galaxy runs of 2 records",
     )
     repeat_every_days: int | None = Field(
         None,
@@ -116,7 +131,18 @@ class ZenodoHarvestWorkflowInput(BaseModel):
             raise ValueError("give at least one raw file extension")
         return value
 
-    @field_validator("galaxy_workflow_id", "notify_email", mode="before")
+    @field_validator("zenodo_record_ids")
+    @classmethod
+    def _check_record_ids(cls, value: list[str]) -> list[str]:
+        """Spaces and repeats are dropped; each ID must be a number."""
+        ids = list(dict.fromkeys(v.strip() for v in value if v.strip()))
+        if bad := [v for v in ids if not re.fullmatch(RECORD_ID_PATTERN, v)]:
+            raise ValueError(f"Zenodo record IDs are numbers, got {bad}")
+        return ids
+
+    @field_validator(
+        "galaxy_workflow_id", "zenodo_query", "notify_email", mode="before"
+    )
     @classmethod
     def _empty_is_none(cls, value: str | None) -> str | None:
         return value.strip() or None if isinstance(value, str) else value
@@ -130,6 +156,7 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         return {
             "galaxy_workflow_id": self.galaxy_workflow_id,
             "raw_extensions": self.raw_extensions,
+            "zenodo_query": self.zenodo_query,
         }
 
 
@@ -161,6 +188,9 @@ class PrepareRunInput(ConfigOverrides):
     )
     dry_run: bool
     max_records: int | None = None
+    zenodo_record_ids: list[str] = Field(
+        default_factory=list, description="Records searched in place of the query."
+    )
 
 
 class PrepareRunResult(BaseModel):
@@ -174,6 +204,9 @@ class SearchZenodoInput(ConfigOverrides):
     """Input for the activity that searches Zenodo."""
 
     run_dir: str
+    record_ids: list[str] = Field(
+        default_factory=list, description="If set, these records, not the query."
+    )
     zenodo_token: SecretStr | None = Field(
         None, description="From the form; empty uses the worker's ZENODO_TOKEN."
     )
@@ -343,11 +376,18 @@ class WriteReportInput(BaseModel):
     steps: dict[str, Any] = Field(
         ..., description="Summaries of the galaxy, nomad and merge steps."
     )
+    user_id: str | None = Field(
+        None, description="Whose state project gets a copy; empty: no copy."
+    )
+    dry_run: bool = Field(True, description="A dry run saves no copy in NOMAD.")
 
 
 class WriteReportResult(BaseModel):
     report_path: str = Field(..., description="report.json, for programs.")
     markdown_path: str = Field(..., description="report.md, for people.")
+    nomad_folder: str | None = Field(
+        None, description="Folder of the copy in the state project, if saved."
+    )
 
 
 class EmailReportInput(BaseModel):

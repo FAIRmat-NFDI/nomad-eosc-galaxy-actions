@@ -55,6 +55,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     poll_galaxy,
     prepare_batch,
     prepare_run,
+    report_folder,
     run_galaxy,
     search_zenodo,
     write_candidates,
@@ -78,6 +79,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     RunGalaxyInput,
     SearchZenodoInput,
     WriteReportInput,
+    WriteReportResult,
     ZenodoHarvestWorkflowInput,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
@@ -339,6 +341,36 @@ def test_search_zenodo_activity(tmp_path, fake_zenodo, harvest_config_file):
     assert len(content["candidates"]) == result.candidates
 
 
+def test_search_zenodo_activity_for_given_records(
+    tmp_path, fake_zenodo, harvest_config_file, zenodo_hits
+):
+    hit = zenodo_hits[0]
+    fake_zenodo.records = {str(hit["id"]): hit}
+
+    result = ActivityEnvironment().run(
+        search_zenodo,
+        SearchZenodoInput(run_dir=str(tmp_path), record_ids=[str(hit["id"]), "404"]),
+    )
+
+    assert (result.candidates, result.rejected) == (1, 1)
+    assert all("/api/records/" in r and "q=" not in r for r in fake_zenodo.requests)
+    content = json.loads(Path(result.candidates_path).read_text())
+    assert (content["query"], content["record_ids"]) == (None, [str(hit["id"]), "404"])
+    assert content["rejected"] == [{"record_id": "404", "reason": "not_found"}]
+
+
+def test_search_zenodo_activity_uses_the_form_query(
+    tmp_path, fake_zenodo, harvest_config_file
+):
+    result = ActivityEnvironment().run(
+        search_zenodo, SearchZenodoInput(run_dir=str(tmp_path), zenodo_query="AFM")
+    )
+
+    assert "q=AFM" in fake_zenodo.requests[0]
+    content = json.loads(Path(result.candidates_path).read_text())
+    assert (content["query"], content["record_ids"]) == ("AFM", None)
+
+
 @pytest.mark.asyncio
 async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     max_records = 2
@@ -356,10 +388,10 @@ async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     used = HarvestConfig.model_validate(run_config["harvest_config"])
     assert used.zenodo_url == json.loads(harvest_config_file.read_text())["zenodo_url"]
     assert (run_dir / CANDIDATES_FILE).is_file()
-    # First two hits: 10843653 (zip + README) and 10443995 (small zip + two
-    # context files; its 9.3 GB zip is skipped as too large).
+    # First two hits: 10843653 (zip + README) and 10443995 (small zip, two .npy
+    # and two annotation files; its 9.3 GB zip is skipped as too large).
     assert result["work_list_records"] == 2  # noqa: PLR2004
-    assert result["work_list_files"] == 5  # noqa: PLR2004
+    assert result["work_list_files"] == 7  # noqa: PLR2004
     assert result["skipped_files"] == 1
     assert json.loads((run_dir / WORK_LIST_FILE).read_text())["run_id"] == workflow_id
     # The shipped config has no Galaxy workflow ID.
@@ -1345,8 +1377,10 @@ async def test_workflow_fails_without_output(
     with pytest.raises(WorkflowFailureError) as error:
         await _run_workflow(workflow_id, dry_run=False)
     assert f"no output named {missing!r}" in str(error.value.cause)
-    # Only the state project is read; nothing is written to NOMAD.
-    assert _writes(nomad_config) == []
+    # No harvest project and no state; only the report goes to the state project.
+    (state_project,) = nomad_config.projects.values()
+    assert state_project["upload_name"] == STATE_PROJECT
+    assert {path.split("/")[0] for path in state_project["files"]} == {"reports"}
     [report_path] = actions_fs.rglob(REPORT_FILE)
     assert json.loads(report_path.read_text())["failure"]["step"] == "galaxy"
 
@@ -1481,6 +1515,60 @@ def test_write_report_after_placeholder(tmp_path):
     assert [r["record_id"] for r in report["records"]] == ["101"]
     assert report["failed_files"] == []
     assert Path(result.markdown_path).read_text().startswith("# Zenodo harvest")
+
+
+def _report_run(tmp_path, **values) -> WriteReportResult:
+    run_config = {"run_id": "run-1", "started_at": "2026-11-06T11:00:00+01:00"}
+    (tmp_path / RUN_CONFIG_FILE).write_text(json.dumps(run_config))
+    steps = {"galaxy": {"status": "skipped", "reason": "no_work"}}
+    return ActivityEnvironment().run(
+        write_report, WriteReportInput(run_dir=str(tmp_path), steps=steps, **values)
+    )
+
+
+def test_write_report_saves_a_copy_in_the_state_project(
+    tmp_path, harvest_config_file, fake_nomad
+):
+    result = _report_run(tmp_path, user_id="u1", dry_run=False)
+
+    folder = "reports/2026-11-06T10-00-00Z"  # start time in UTC
+    assert result.nomad_folder == folder
+    (state_project,) = fake_nomad.projects.values()
+    assert state_project["upload_name"] == STATE_PROJECT
+    files = state_project["files"]
+    assert files[f"{folder}/{REPORT_FILE}"] == Path(result.report_path).read_bytes()
+    assert files[f"{folder}/{REPORT_MARKDOWN_FILE}"].startswith(b"# Zenodo harvest")
+
+
+@pytest.mark.parametrize("values", [{}, {"user_id": "u1"}, {"dry_run": False}])
+def test_write_report_saves_no_copy_in_dry_runs(
+    tmp_path, harvest_config_file, fake_nomad, values
+):
+    """Dry runs (the default) and inputs without a user leave NOMAD alone."""
+    assert _report_run(tmp_path, **values).nomad_folder is None
+    assert fake_nomad.projects == {}
+
+
+def test_write_report_without_nomad_still_writes_the_report(
+    tmp_path, harvest_config_file, fake_nomad, monkeypatch
+):
+    monkeypatch.delenv("NOMAD_PAT")  # NOMAD cannot be reached
+
+    result = _report_run(tmp_path, user_id="u1", dry_run=False)
+
+    assert result.nomad_folder is None
+    assert Path(result.report_path).is_file()
+
+
+@pytest.mark.parametrize(
+    ("started_at", "expected"),
+    [
+        ("2026-11-06T10:00:00.123456+00:00", "reports/2026-11-06T10-00-00Z"),
+        (None, "reports/a_b-run-001"),  # no start time: the run ID, made safe
+    ],
+)
+def test_report_folder(started_at, expected):
+    assert report_folder(started_at, "a:b-run-001") == expected
 
 
 def _email_input(tmp_path) -> EmailReportInput:

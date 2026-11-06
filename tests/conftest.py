@@ -36,11 +36,15 @@ class FakeZenodo(ThreadingHTTPServer):
 
     `pages` maps page number to response body; `failures` lists HTTP status
     codes to answer with (one per request) before serving normally.
+    `records` maps record IDs to hits for `/api/records/<id>` (others: 404);
+    `redirects` maps concept record IDs to a record ID, as Zenodo does.
     """
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), _FakeZenodoHandler)
         self.pages = {1: load_zenodo_page(1), 2: load_zenodo_page(2)}
+        self.records: dict[str, dict] = {}
+        self.redirects: dict[str, str] = {}
         self.failures: list[int] = []
         self.requests: list[str] = []
         self.auth_headers: list[str | None] = []
@@ -58,6 +62,17 @@ class _FakeZenodoHandler(BaseHTTPRequestHandler):
         self.server.auth_headers.append(self.headers.get("Authorization"))
         if self.server.failures:
             self._send(self.server.failures.pop(0), {}, {"Retry-After": "0"})
+            return
+        path = urlparse(self.path).path
+        if path.startswith("/api/records/"):
+            record_id = path.rsplit("/", 1)[1]
+            if record_id in self.server.redirects:
+                target = f"/api/records/{self.server.redirects[record_id]}"
+                self._send(301, {}, {"Location": target})
+            elif record_id in self.server.records:
+                self._send(200, self.server.records[record_id])
+            else:
+                self._send(404, {"status": 404, "message": "not found"})
             return
         page = int(parse_qs(urlparse(self.path).query).get("page", ["1"])[0])
         body = json.loads(json.dumps(self.server.pages.get(page, {"hits": {}})))

@@ -122,6 +122,7 @@ class ZenodoHarvestWorkflow:
                 started_at=workflow.now().isoformat(),
                 dry_run=data.dry_run,
                 max_records=data.max_records,
+                zenodo_record_ids=data.zenodo_record_ids,
                 **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(minutes=1),
@@ -168,6 +169,7 @@ class ZenodoHarvestWorkflow:
             SearchZenodoInput(
                 run_dir=run_dir,
                 zenodo_token=data.zenodo_token,
+                record_ids=data.zenodo_record_ids,
                 **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(minutes=15),
@@ -484,7 +486,12 @@ class ZenodoHarvestWorkflow:
         """Write the report and email it; a failed email does not fail the run."""
         written = await workflow.execute_activity(
             write_report,
-            WriteReportInput(run_dir=run_dir, steps=steps),
+            WriteReportInput(
+                run_dir=run_dir,
+                steps=steps,
+                user_id=data.user_id,
+                dry_run=data.dry_run,
+            ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
         )

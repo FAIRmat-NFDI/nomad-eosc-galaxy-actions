@@ -36,9 +36,11 @@ Start it from **Actions** in the main menu. No project needs to be selected.
 |---|---|
 | `dry_run` | Default on. Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. |
 | `galaxy_workflow_id` | ID of the harvest workflow in your Galaxy account. Empty uses the harvest config's `galaxy_workflow_id`. |
+| `zenodo_query` | Zenodo search query ([search syntax](https://help.zenodo.org/guides/search/){:target="_blank" rel="noopener"}). Empty uses the harvest config's `zenodo_query`. |
+| `zenodo_record_ids` | Only these Zenodo records, in place of the query. A concept record ID means its latest version. Unknown IDs are reported as `not_found`. |
 | `raw_extensions` | Raw file extensions converted to NeXus. Default `.sxm`, `.dat`, `.sm4`, `.spm`, `.flt`. Written in any case, with or without the dot. |
 | `max_records` | Process at most this many Zenodo records with new work. Empty means no limit. |
-| `records_per_work_list` | Default 1. Zenodo records sent to Galaxy together in one work list; each work list is one Galaxy run. Empty means all records in one work list. |
+| `records_per_work_list` | Default 1. Zenodo records sent to Galaxy together in one work list; each work list is one Galaxy run. Empty means all records in one work list. Example: `max_records` 6 and `records_per_work_list` 2 → 6 records in 3 Galaxy runs of 2 records. |
 | `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
 | `max_runs` | With `repeat_every_days`: stop after this many runs. Empty means until the Action is stopped. |
 | `allow_duplicate_projects` | Default off. On: also convert raw files that are already in one of your NOMAD projects. |
@@ -74,8 +76,12 @@ zenodo_22402764/
   10.5281_zenodo.22402765/    one folder per version, named after its DOI
     zenodo_harvest.json
     <raw file stem>/          raw file, NeXus file and eln_data.yaml
-    Complementaries/          the dataset's other files (README, notes, ...)
+    Complementaries/          the dataset's other files (README, notes, images, ...)
 ```
+
+`Complementaries` holds every file of the dataset that is not a raw file and not matched by the
+harvest config's `ignore_patterns`, at its path in the dataset. Loose files larger than
+`max_archive_bytes` are not downloaded (reported as `too_large`).
 
 ### Zenodo IDs on each entry
 
@@ -101,6 +107,9 @@ published ones) and updates `state.json`:
 - A raw file whose entry was deleted in NOMAD is converted again by the next run.
 - Failed files and archives are known only from `state.json`. Without the state project, the next run
   tries them again.
+
+Each real run (not a dry run) also copies its report there: `reports/<start time in UTC>/report.json`
+and `report.md`. Open them in the project's file browser.
 
 ### Batches
 
@@ -130,7 +139,8 @@ Already processed files are not handled twice.
 
 ### Report
 
-Each run writes `report.json` and `report.md` into its run folder: the Zenodo search, the work list,
+Each run writes `report.json` and `report.md` into its run folder (and a copy into the
+[state project](#state-project)): the Zenodo search, the work list,
 each batch, Galaxy, the NOMAD projects (with their upload IDs) and every skipped or failed file with its reason,
 duplicates included. It is emailed to the address of your NOMAD account.
 

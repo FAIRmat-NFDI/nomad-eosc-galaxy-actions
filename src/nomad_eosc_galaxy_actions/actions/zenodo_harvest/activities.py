@@ -119,6 +119,9 @@ RESULTS_FILE = "results.json"
 PROJECTS_DIR = "projects"
 REPORT_FILE = "report.json"
 REPORT_MARKDOWN_FILE = "report.md"
+# Folder of the state project with one subfolder per run, named by its start
+# time; NOMAD's file browser shows these files.
+REPORTS_FOLDER = "reports"
 # Step index of the work list input in the harvest's Galaxy workflow.
 GALAXY_WORK_LIST_STEP = "0"
 # Zenodo allows larger pages for authenticated requests.
@@ -193,16 +196,39 @@ def _pull_state(harvest_config: HarvestConfig, user_id: str) -> None:
         temp.replace(path)
 
 
+def _state_project(projects: nomad_projects.Projects) -> str:
+    """Upload ID of the user's state project; created if missing."""
+    upload_id = projects.unpublished_projects().get(STATE_PROJECT)
+    return upload_id or projects.create(STATE_PROJECT, None)
+
+
 def _push_state(harvest_config: HarvestConfig, user_id: str) -> None:
     """Write the local state file into the state project (created if missing)."""
     path = _state_path(harvest_config, user_id)
     if not path.is_file():
         return
     projects = _projects(harvest_config, user_id)
-    upload_id = projects.unpublished_projects().get(STATE_PROJECT)
-    if upload_id is None:
-        upload_id = projects.create(STATE_PROJECT, None)
-    projects.write_file(upload_id, STATE_FILE, path.read_bytes())
+    projects.write_file(_state_project(projects), STATE_FILE, path.read_bytes())
+
+
+def report_folder(started_at: str | None, run_id: str) -> str:
+    """`reports/2026-11-06T10-00-00Z`; the run ID if the start time is unknown."""
+    if started_at:
+        start = datetime.fromisoformat(started_at).astimezone(timezone.utc)
+        name = start.strftime("%Y-%m-%dT%H-%M-%SZ")
+    else:
+        name = re.sub(r"[^\w.-]", "_", run_id)
+    return f"{REPORTS_FOLDER}/{name}"
+
+
+def _push_report(
+    harvest_config: HarvestConfig, user_id: str, folder: str, paths: list[Path]
+) -> None:
+    """Copy the report files into the state project's `folder`."""
+    projects = _projects(harvest_config, user_id)
+    upload_id = _state_project(projects)
+    for path in paths:
+        projects.write_file(upload_id, f"{folder}/{path.name}", path.read_bytes())
 
 
 def _checksum_index(harvest_config: HarvestConfig) -> checksum_index.ChecksumIndex:
@@ -221,8 +247,8 @@ def write_run_config(
     - `schema_version`: version of this file's layout (keys and their meaning),
       not of the data. A reader that finds an older version knows the layout
       differs and can convert it. See RUN_CONFIG_SCHEMA_VERSION.
-    - `action_instance_id`, `run_id`, `started_at`, `dry_run`, `max_records`:
-      the run's inputs (`run_id` added in version 2).
+    - `action_instance_id`, `run_id`, `started_at`, `dry_run`, `max_records`,
+      `zenodo_record_ids`: the run's inputs (`run_id` added in version 2).
     - `harvest_config`: the harvest config used by this run (already upgraded
       to the current version), so the run can be explained even after the
       config file changes.
@@ -244,6 +270,7 @@ def write_run_config(
         "started_at": data.started_at,
         "dry_run": data.dry_run,
         "max_records": data.max_records,
+        "zenodo_record_ids": data.zenodo_record_ids,
         "harvest_config": harvest_config,
     }
     path = run_dir / RUN_CONFIG_FILE
@@ -282,19 +309,22 @@ def prepare_run(data: PrepareRunInput) -> PrepareRunResult:
 
 def write_candidates(
     run_dir: str | Path,
-    query: str,
+    query: str | None,
     candidates: list[zenodo_client.ZenodoRecord],
     rejections: list[zenodo_client.Rejection],
+    record_ids: list[str] | None = None,
 ) -> Path:
     """Write the search result to `run_dir/candidates.json`.
 
     The file holds `schema_version` (see CANDIDATES_SCHEMA_VERSION), the
-    `query`, the `candidates` (full records) and the `rejected` records with
-    their reason, so every skipped record can be explained in the report.
+    `query` or the requested `record_ids` (the other one is null), the
+    `candidates` (full records) and the `rejected` records with their reason,
+    so every skipped record can be explained in the report.
     """
     content = {
         "schema_version": CANDIDATES_SCHEMA_VERSION,
         "query": query,
+        "record_ids": record_ids or None,
         "candidates": [record.model_dump(mode="json") for record in candidates],
         "rejected": [rejection.model_dump(mode="json") for rejection in rejections],
     }
@@ -307,25 +337,41 @@ def write_candidates(
 def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
     """Search Zenodo and write the candidates of this run to candidates.json.
 
+    With `record_ids`, only these records are fetched; the query is not used.
     An optional Zenodo token (form field, else the worker's ZENODO_TOKEN)
     allows larger pages.
     """
     harvest_config = _harvest_config(data)
     token = _secret("zenodo", data.zenodo_token, required=False)
-    hits = zenodo_client.iter_search_hits(
-        zenodo_client.make_session(token),
-        harvest_config.zenodo_query,
-        zenodo_url=harvest_config.zenodo_url,
-        page_size=PAGE_SIZE_AUTHENTICATED if token else PAGE_SIZE_ANONYMOUS,
-        request_delay=harvest_config.zenodo_request_delay,
-    )
+    session = zenodo_client.make_session(token)
+    missing: list[zenodo_client.Rejection] = []
+    if data.record_ids:
+        hits, missing = zenodo_client.fetch_records(
+            session,
+            data.record_ids,
+            zenodo_url=harvest_config.zenodo_url,
+            request_delay=harvest_config.zenodo_request_delay,
+        )
+    else:
+        hits = zenodo_client.iter_search_hits(
+            session,
+            harvest_config.zenodo_query,
+            zenodo_url=harvest_config.zenodo_url,
+            page_size=PAGE_SIZE_AUTHENTICATED if token else PAGE_SIZE_ANONYMOUS,
+            request_delay=harvest_config.zenodo_request_delay,
+        )
     candidates, rejections = zenodo_client.collect_candidates(
         hits,
         raw_extensions=harvest_config.raw_extensions,
         licenses=harvest_config.licenses,
     )
+    rejections = missing + rejections
     path = write_candidates(
-        data.run_dir, harvest_config.zenodo_query, candidates, rejections
+        data.run_dir,
+        None if data.record_ids else harvest_config.zenodo_query,
+        candidates,
+        rejections,
+        data.record_ids,
     )
     activity.logger.info(
         "Zenodo search: %d candidates, %d rejected", len(candidates), len(rejections)
@@ -788,11 +834,17 @@ def _joined_outputs(
 
 @activity.defn
 def write_report(data: WriteReportInput) -> WriteReportResult:
-    """Write `report.json` and `report.md` into the run folder."""
+    """Write `report.json` and `report.md` into the run folder.
+
+    A real run also copies them into the state project (`reports/<start>/`),
+    where NOMAD's file browser shows them. If that fails, only a warning is
+    logged: the report is still emailed.
+    """
     run_dir = Path(data.run_dir)
     manifest, results, duplicates = _joined_outputs(run_dir)
+    run_config = _read_json(run_dir / RUN_CONFIG_FILE) or {}
     content = report.build_report(
-        run_config=_read_json(run_dir / RUN_CONFIG_FILE) or {},
+        run_config=run_config,
         candidates=_read_json(run_dir / CANDIDATES_FILE) or {},
         work_list=_read_json(run_dir / WORK_LIST_FILE),
         skipped_files=_read_json(run_dir / SKIPPED_FILES_FILE),
@@ -805,8 +857,22 @@ def write_report(data: WriteReportInput) -> WriteReportResult:
     report_path.write_text(json.dumps(content, indent=2), encoding="utf-8")
     markdown_path = run_dir / REPORT_MARKDOWN_FILE
     markdown_path.write_text(report.render_markdown(content), encoding="utf-8")
+    nomad_folder = None
+    if data.user_id and not data.dry_run:
+        folder = report_folder(
+            run_config.get("started_at"), run_config.get("run_id") or "run"
+        )
+        try:
+            _push_report(
+                _harvest_config(), data.user_id, folder, [report_path, markdown_path]
+            )
+            nomad_folder = folder
+        except Exception as error:  # noqa: BLE001  # the report is still emailed
+            activity.logger.warning("Report not saved in NOMAD: %s", error)
     return WriteReportResult(
-        report_path=str(report_path), markdown_path=str(markdown_path)
+        report_path=str(report_path),
+        markdown_path=str(markdown_path),
+        nomad_folder=nomad_folder,
     )
 
 

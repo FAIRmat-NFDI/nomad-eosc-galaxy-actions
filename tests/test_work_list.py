@@ -54,18 +54,39 @@ def _reasons(skipped) -> list[tuple[str, str]]:
     return [(s.key, s.reason) for s in skipped]
 
 
-def test_new_record_downloads_archive_raw_and_context(store):
+def test_new_record_downloads_archive_raw_and_other_files(store):
     record = _record(
         ("data.zip", 500, "z1"),
         ("scan.SXM", 10, "s1"),  # extension case is ignored
         ("readme.md", 1, "r1"),
         ("movie.mp4", 10, "m1"),  # ignored
-        ("model.npz", 10, "n1"),  # neither raw nor context
+        ("model.npz", 10, "n1"),  # neither raw nor context: a complementary file
+        ("README", 1, "r2"),  # no extension
     )
     download, skipped = plan_record(record, store, SETTINGS)
 
-    assert _keys(download) == ["data.zip", "scan.SXM", "readme.md"]
+    assert _keys(download) == [
+        "data.zip",
+        "scan.SXM",
+        "readme.md",
+        "model.npz",
+        "README",
+    ]
     assert skipped == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [(1000, ["scan.sxm", "image.png"], []), (1001, ["scan.sxm"], ["image.png"])],
+)
+def test_complementary_file_size_limit(store, case):
+    size, expected, too_large = case
+    download, skipped = plan_record(
+        _record(("scan.sxm", 10, "s1"), ("image.png", size, "p1")), store, SETTINGS
+    )
+
+    assert _keys(download) == expected
+    assert _reasons(skipped) == [(key, "too_large") for key in too_large]
 
 
 def test_resolved_archive_is_not_downloaded(store):
@@ -89,7 +110,12 @@ def test_record_with_nothing_new_gets_no_context(store):
         store.record_loose_md5(CID, "s1", "sha-s1")
 
     download, skipped = plan_record(
-        _record(("data.zip", 500, "z1"), ("scan.sxm", 10, "s1"), ("readme.md", 1, "r")),
+        _record(
+            ("data.zip", 500, "z1"),
+            ("scan.sxm", 10, "s1"),
+            ("readme.md", 1, "r"),
+            ("huge.png", 5000, "p"),  # too large, but not reported: nothing to do
+        ),
         store,
         SETTINGS,
     )
@@ -221,8 +247,16 @@ def test_build_work_list_on_recorded_hits(store, zenodo_hits):
     assert len(content["records"]) == len(records)  # empty state: all new
     assert _reasons(skipped) == [("STM_data.zip", "too_large")]  # 9.3 GB
     by_id = {r["record_id"]: r for r in content["records"]}
-    assert _keys_of(by_id["22806339"]) == ["topo016.sxm", "LICENSE.txt", "README.md"]
+    # The raw file first, then all other files of the record, in Zenodo's order.
+    files = [f.key for f in _record_by_id(records, "22806339").files]
+    assert _keys_of(by_id["22806339"]) == ["topo016.sxm"] + [
+        key for key in files if key != "topo016.sxm"
+    ]
     assert by_id["10843653"]["concept_doi"] is None
+
+
+def _record_by_id(records: list[ZenodoRecord], record_id: str) -> ZenodoRecord:
+    return next(r for r in records if r.record_id == record_id)
 
 
 def _keys_of(entry: dict) -> list[str]:

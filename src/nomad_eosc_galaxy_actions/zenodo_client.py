@@ -140,6 +140,37 @@ def iter_search_hits(  # noqa: PLR0913
             time.sleep(request_delay)
 
 
+def fetch_records(  # noqa: PLR0913
+    session: requests.Session,
+    record_ids: Iterable[str],
+    *,
+    zenodo_url: str = DEFAULT_ZENODO_URL,
+    request_delay: float = 0.0,
+    timeout: float = 30.0,
+) -> tuple[list[dict[str, Any]], list[Rejection]]:
+    """Raw hits of the given records, in place of a search.
+
+    A concept record ID gives its latest version (Zenodo redirects to it).
+    A record that does not exist is rejected as `not_found`.
+
+    Raises:
+        requests.RequestException: as `iter_search_hits`, for other errors.
+    """
+    hits: list[dict[str, Any]] = []
+    missing: list[Rejection] = []
+    base = f"{zenodo_url.rstrip('/')}/api/records"
+    for i, record_id in enumerate(dict.fromkeys(record_ids)):
+        if i and request_delay:
+            time.sleep(request_delay)
+        response = session.get(f"{base}/{record_id}", timeout=timeout)
+        if response.status_code in (404, 410):  # unknown or deleted
+            missing.append(Rejection(record_id=record_id, reason="not_found"))
+            continue
+        response.raise_for_status()
+        hits.append(response.json())
+    return hits, missing
+
+
 def has_extension(key: str, extensions: Iterable[str]) -> bool:
     """True if the file name ends with one of the extensions (any case)."""
     return key.lower().endswith(tuple(ext.lower() for ext in extensions))

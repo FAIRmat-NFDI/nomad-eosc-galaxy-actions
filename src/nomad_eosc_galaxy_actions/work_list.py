@@ -11,7 +11,9 @@ Applies the decision table of the project plan to each candidate record:
 - an archive larger than `max_archive_bytes` is skipped (`too_large`);
 - a loose raw file is downloaded unless its Zenodo MD5 is already known;
 - a record with nothing to download is left out;
-- loose context files always come along with a record that is listed.
+- all other loose files (context files, images, other formats) come along
+  with a record that is listed, for the project's Complementaries folder;
+  above `max_archive_bytes` they are skipped (`too_large`).
 
 Framework-agnostic: no NOMAD or Temporal imports.
 """
@@ -68,13 +70,14 @@ def plan_record(
 ) -> tuple[list[ZenodoFile], list[SkippedFile]]:
     """Files to download for one record, and files skipped with a reason.
 
-    Returns no files to download if the record has nothing new; its loose
-    context files are only added when something else is downloaded.
+    Returns no files to download if the record has nothing new; its other
+    loose files are only added when something else is downloaded.
     """
     cid = record.concept_record_id
     work: list[ZenodoFile] = []
-    context: list[ZenodoFile] = []
+    extras: list[ZenodoFile] = []
     skipped: list[SkippedFile] = []
+    too_large: list[ZenodoFile] = []  # reported only if the record has work
 
     def skip(file: ZenodoFile, reason: str) -> None:
         skipped.append(
@@ -97,10 +100,18 @@ def plan_record(
                 skip(file, "already_known")
             else:
                 work.append(file)
-        elif has_extension(file.key, settings.context_extensions):
-            context.append(file)
+        elif file.size > settings.max_archive_bytes:
+            too_large.append(file)
+        else:
+            extras.append(file)
 
-    return (work + context if work else []), skipped
+    if not work:
+        return [], skipped
+    skipped.extend(
+        SkippedFile(record_id=record.record_id, key=f.key, reason="too_large")
+        for f in too_large
+    )
+    return work + extras, skipped
 
 
 def _known(store: StateStore, concept_record_id: str, in_projects: Iterable[str]):
