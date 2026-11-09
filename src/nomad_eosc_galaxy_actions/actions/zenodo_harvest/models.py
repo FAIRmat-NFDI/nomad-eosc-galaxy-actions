@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pydantic models for the zenodo-harvest action's workflow and activities."""
 
+import json
 import re
 from typing import Any
 
@@ -17,6 +18,16 @@ from nomad_eosc_galaxy_actions.credentials import reveal
 DEFAULT_RAW_EXTENSIONS = [".sxm", ".dat", ".sm4", ".spm", ".flt"]
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 RECORD_ID_PATTERN = r"^\d+$"
+# Shown as suggestions under the form's query field (JSON schema `examples`).
+# Each one found records on Zenodo on 2026-11-09.
+ZENODO_QUERY_EXAMPLES = [
+    '("scanning tunneling microscopy" OR STM) AND (Nanonis OR ".sxm") '
+    "AND resource_type.type:dataset",
+    '(STM OR "scanning tunneling microscopy") AND ".sxm" '
+    "AND publication_date:[2024-01-01 TO *]",
+    'title:"scanning tunneling" AND resource_type.type:dataset',
+    "(STM OR AFM) AND Nanonis AND access_right:open",
+]
 
 
 def _normalize_extensions(values: list[str] | None) -> list[str] | None:
@@ -63,8 +74,9 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     zenodo_query: str | None = Field(
         None,
-        description="Zenodo search query; empty uses the harvest config. "
-        "Example: STM AND resource_type.type:dataset",
+        description="Zenodo search query; empty uses the harvest config. Click "
+        "for more examples. Example: STM AND resource_type.type:dataset",
+        examples=ZENODO_QUERY_EXAMPLES,
     )
     zenodo_record_ids: list[str] = Field(
         default_factory=list,
@@ -96,7 +108,8 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     max_runs: int | None = Field(
         None,
         ge=1,
-        description="With repeat_every_days: stop after N runs. Example: 4",
+        description="With repeat_every_days: number of runs, the first included. "
+        "Example: 4 → this run and 3 repeats",
     )
     allow_duplicate_projects: bool = Field(
         False,
@@ -146,6 +159,22 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     @classmethod
     def _empty_is_none(cls, value: str | None) -> str | None:
         return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("zenodo_query")
+    @classmethod
+    def _decode_query_copied_from_json(cls, value: str | None) -> str | None:
+        """`"(\\"STM\\" OR ...)"`, copied from a JSON file, is decoded once.
+
+        Zenodo would read it as one phrase and find nothing. A plain phrase
+        such as `"STM data"` has no escaped quotes and is kept.
+        """
+        if not (value and value[0] == value[-1] == '"' and '\\"' in value):
+            return value
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return decoded.strip()  # still has a quote, so never empty
 
     @field_serializer("galaxy_api_key", "zenodo_token", when_used="json")
     def _dump_secret(self, value: SecretStr | None) -> str | None:

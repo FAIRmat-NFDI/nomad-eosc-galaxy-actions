@@ -20,6 +20,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     DEFAULT_RAW_EXTENSIONS,
+    ZENODO_QUERY_EXAMPLES,
     BuildWorkListInput,
     ZenodoHarvestWorkflowInput,
 )
@@ -78,6 +79,37 @@ def test_empty_text_fields_mean_not_set():
         None,
         None,
     )
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        # Copied from a JSON file: decoded once.
+        (
+            r'"(\"scanning tunneling microscopy\" OR Nanonis) AND type:dataset"',
+            '("scanning tunneling microscopy" OR Nanonis) AND type:dataset',
+        ),
+        (r' "\"STM\"" ', '"STM"'),  # outer spaces are trimmed first
+        (r'" \"STM\" "', '"STM"'),  # inner spaces too
+        (r'" \" "', '"'),  # a lone escaped quote
+        # Kept as given.
+        ('"scanning tunneling microscopy"', '"scanning tunneling microscopy"'),
+        ('"STM" AND "AFM"', '"STM" AND "AFM"'),  # no escaped quote
+        (r"STM AND \"AFM\"", r"STM AND \"AFM\""),  # no outer quotes
+        (r'"\"STM\" \x"', r'"\"STM\" \x"'),  # not valid JSON
+        ('"', '"'),
+    ],
+)
+def test_zenodo_query_copied_from_json_is_decoded(given, expected):
+    assert _form(zenodo_query=given).zenodo_query == expected
+
+
+def test_zenodo_query_examples_are_in_the_schema_and_used_as_given():
+    query = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]["zenodo_query"]
+
+    assert query["examples"] == ZENODO_QUERY_EXAMPLES
+    for example in ZENODO_QUERY_EXAMPLES:
+        assert _form(zenodo_query=example).zenodo_query == example
 
 
 @pytest.mark.parametrize(
