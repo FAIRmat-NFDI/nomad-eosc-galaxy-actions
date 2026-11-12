@@ -19,8 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # Version of the harvest config layout (keys and their meaning), not of the
 # values. When the layout changes: bump it and add an upgrade to UPGRADES.
-HARVEST_CONFIG_SCHEMA_VERSION = 3
+HARVEST_CONFIG_SCHEMA_VERSION = 4
 DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "config" / "harvest_config.json"
+# LLM Hub on usegalaxy.eu, without version (the newest is used), and a multimodal model
+# there: it gave the best ELN in a comparison (2026-11-12).
+DEFAULT_LLM_HUB_TOOL_ID = "toolshed.g2.bx.psu.edu/repos/bgruening/llm_hub/llm_hub"
+DEFAULT_LLM_MODEL = "mistral-medium-3.5-e-infra.cz"
 
 
 def _add_setting(content: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
@@ -43,10 +47,18 @@ def _add_state_dir(content: dict[str, Any]) -> dict[str, Any]:
     return _add_setting(content, "state_dir", "")
 
 
+def _add_eln_settings(content: dict[str, Any]) -> dict[str, Any]:
+    """Version 4 adds the ELN settings: the run's user, LLM Hub and its model."""
+    content = _add_setting(content, "eln_user", True)
+    content = _add_setting(content, "llm_hub_tool_id", DEFAULT_LLM_HUB_TOOL_ID)
+    return _add_setting(content, "llm_model", DEFAULT_LLM_MODEL)
+
+
 # UPGRADES[n] turns the content of a version-n file into version n + 1.
 UPGRADES: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     1: _add_nomad_url,
     2: _add_state_dir,
+    3: _add_eln_settings,
 }
 
 
@@ -115,6 +127,25 @@ class HarvestConfig(BaseModel):
         description=(
             "NOMAD API URL (ending in /api/v1) where projects are created, "
             "using the worker's NOMAD_PAT. Empty: the NOMAD that runs the Action."
+        )
+    )
+    eln_user: bool = Field(
+        description=(
+            "Write the NOMAD user who runs the harvest (name, email, affiliation) "
+            "into the ELNs; it is sent to Galaxy in the work list."
+        )
+    )
+    llm_hub_tool_id: str = Field(
+        description=(
+            "ID of Galaxy's LLM Hub tool, used to read its model list; without "
+            "version, the newest is used."
+        )
+    )
+    llm_model: str = Field(
+        description=(
+            "LLM Hub multimodal model of the ELN step when the form leaves it "
+            "empty: a value of the server's genai_models table, e.g. "
+            "mistral-medium-3.5-e-infra.cz."
         )
     )
     state_dir: str = Field(

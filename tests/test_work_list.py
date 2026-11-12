@@ -174,6 +174,17 @@ def test_build_work_list_empty(store):
     assert content["raw_extensions"] == [".sxm"]
 
 
+def test_build_work_list_carries_the_user(store):
+    user = {"name": "Ada Lovelace", "email": "ada@example.org"}
+
+    content, _ = build_work_list([], store, SETTINGS, run_id="run-1", user=user)
+    batch = batch_work_list(content, [], run_id="run-1-b1", store=store)
+
+    assert content["user"] == user
+    assert batch["user"] == user  # each batch keeps it
+    assert "user" not in build_work_list([], store, SETTINGS, run_id="run-1")[0]
+
+
 def test_build_work_list_lists_only_records_with_work(store):
     with store.transaction():
         store.set_archive_resolved(CID, "done", True)

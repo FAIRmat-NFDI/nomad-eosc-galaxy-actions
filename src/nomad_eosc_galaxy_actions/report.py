@@ -212,6 +212,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             b["folder"],
             ", ".join(b["records"]),
             (b.get("galaxy") or {}).get("history_id"),
+            (b.get("galaxy") or {}).get("llm"),
             _batch_result(b),
         ]
         for b in report.get("batches", [])
@@ -230,7 +231,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
         + _table(["Step", "Result"], overview)
         + "\n## Batches\n\n"
-        + _table(["Batch", "Records", "Galaxy history", "Result"], batches)
+        + _table(["Batch", "Records", "Galaxy history", "LLM", "Result"], batches)
         + "\n## Records\n\n"
         + _table(["Record", "Title", "DOI", "NOMAD upload ID or reason"], records)
         + "\n## Skipped files\n\n"

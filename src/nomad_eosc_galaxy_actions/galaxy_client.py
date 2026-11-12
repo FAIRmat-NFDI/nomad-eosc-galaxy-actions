@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from bioblend.galaxy import GalaxyInstance
 
@@ -48,6 +49,7 @@ def upload_and_invoke(  # noqa: PLR0913
     file_type: str = "auto",
     workflow_input_step: str = "0",
     tool_params: dict[str, dict[str, Any]] | None = None,
+    parameter_inputs: dict[str, Any] | None = None,
     history_name: str | None = None,
     galaxy_url: str = GALAXY_URL,
 ) -> dict[str, str]:
@@ -64,6 +66,8 @@ def upload_and_invoke(  # noqa: PLR0913
         tool_params: `{step_index: {param_name: value, ...}, ...}`, forwarded
             to `invoke_workflow`'s `params` as-is — shape depends entirely on
             the target tool(s)' own parameters.
+        parameter_inputs: `{step_index: value}` for the workflow's parameter
+            inputs (text, boolean, ...); unset ones keep their default.
         history_name: defaults to the uploaded file's stem if not given.
 
     Returns:
@@ -84,12 +88,32 @@ def upload_and_invoke(  # noqa: PLR0913
 
     invocation = gi.workflows.invoke_workflow(
         workflow_id,
-        inputs={workflow_input_step: {"src": "hda", "id": input_dataset_id}},
+        inputs={
+            workflow_input_step: {"src": "hda", "id": input_dataset_id},
+            **(parameter_inputs or {}),
+        },
         params=tool_params,
         history_id=history["id"],
         inputs_by="step_index",
     )
     return {"history_id": history["id"], "invocation_id": invocation["id"]}
+
+
+def tool_form(
+    api_key: str, tool_id: str, galaxy_url: str = GALAXY_URL
+) -> dict[str, Any] | None:
+    """A tool's form as Galaxy builds it (inputs, options, defaults), or None if
+    the server has no such tool.
+
+    `tool_id` may leave out the version (the newest is used). The ID is encoded,
+    since Tool Shed IDs contain slashes.
+    """
+    gi = get_instance(api_key, galaxy_url)
+    response = gi.make_get_request(f"{gi.url}/tools/{quote(tool_id, safe='')}/build")
+    if response.status_code in {400, 404}:
+        return None
+    response.raise_for_status()
+    return response.json()
 
 
 def poll_invocation(

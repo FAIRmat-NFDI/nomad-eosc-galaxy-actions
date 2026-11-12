@@ -147,16 +147,43 @@ def test_upgrade_from_middle_version():
     assert result == {"schema_version": 3, "q": "STM", "page_size": 25}
 
 
+# Settings added by version 4.
+ELN_SETTINGS = ("eln_user", "llm_hub_tool_id", "llm_model")
+
+
 def _version_1(shipped: dict) -> dict:
-    content = {k: v for k, v in shipped.items() if k not in ("nomad_url", "state_dir")}
+    added = ("nomad_url", "state_dir", *ELN_SETTINGS)
+    content = {k: v for k, v in shipped.items() if k not in added}
     return content | {"schema_version": 1}
 
 
 def test_version_2_file_gets_empty_state_dir(tmp_path, shipped):
-    content = {k: v for k, v in shipped.items() if k != "state_dir"}
+    content = {
+        k: v for k, v in shipped.items() if k not in ("state_dir", *ELN_SETTINGS)
+    }
     path = _write(tmp_path, content | {"schema_version": 2})
 
     assert load_harvest_config(path).state_dir == ""
+
+
+def test_version_3_file_gets_the_eln_defaults(tmp_path, shipped):
+    content = {k: v for k, v in shipped.items() if k not in ELN_SETTINGS}
+    path = _write(tmp_path, content | {"schema_version": 3})
+
+    config = load_harvest_config(path)
+    assert config.eln_user is True
+    assert config.llm_model == "mistral-medium-3.5-e-infra.cz"
+    assert (
+        config.llm_hub_tool_id
+        == "toolshed.g2.bx.psu.edu/repos/bgruening/llm_hub/llm_hub"
+    )
+
+
+def test_version_3_file_with_an_llm_setting_is_refused(tmp_path, shipped):
+    path = _write(tmp_path, shipped | {"schema_version": 3})
+
+    with pytest.raises(HarvestConfigError, match="no setting 'eln_user'"):
+        load_harvest_config(path)
 
 
 def test_old_file_is_upgraded_and_never_rewritten(tmp_path, shipped):

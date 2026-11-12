@@ -127,6 +127,7 @@ def build_work_list(  # noqa: PLR0913
     run_id: str,
     max_records: int | None = None,
     in_projects: Iterable[str] = (),
+    user: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[SkippedFile]]:
     """Build the content of `work_list.json` and the list of skipped files.
 
@@ -138,6 +139,9 @@ def build_work_list(  # noqa: PLR0913
     record that already have a final status, plus `in_projects` (raw files
     already in one of the user's projects), so Galaxy does not convert them
     again when they show up in a new archive.
+
+    `user` (name, email, affiliation, address) is the person who runs the
+    harvest; Galaxy writes it as the ELN's only user.
     """
     records: list[dict[str, Any]] = []
     skipped: list[SkippedFile] = []
@@ -174,6 +178,8 @@ def build_work_list(  # noqa: PLR0913
         "ignore_patterns": settings.ignore_patterns,
         "records": records,
     }
+    if user:
+        work_list["user"] = user
     return work_list, skipped
 
 

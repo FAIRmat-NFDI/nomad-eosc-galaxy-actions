@@ -353,6 +353,7 @@ class ZenodoHarvestWorkflow:
             RunGalaxyInput(
                 work_list_path=work_list_path,
                 run_id=run_id,
+                use_llm=data.use_llm,
                 galaxy_api_key=galaxy_api_key,
                 **data.config_overrides(),
             ),
@@ -408,6 +409,7 @@ class ZenodoHarvestWorkflow:
         galaxy = {
             "status": "ok",
             "history_id": started.history_id,
+            "llm": started.llm,
             "manifest_path": fetched.manifest_path,
             "placeholder": fetched.placeholder,
         }

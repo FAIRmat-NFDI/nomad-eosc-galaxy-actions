@@ -44,6 +44,8 @@ Start it from **Actions** in the main menu. No project needs to be selected.
 | `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
 | `max_runs` | With `repeat_every_days`: stop after this many runs. Empty means until the Action is stopped. |
 | `allow_duplicate_projects` | Default off. On: also convert raw files that are already in one of your NOMAD projects. |
+| `use_llm` | Default on. An LLM ([LLM Hub](https://galaxyproject.org/news/2025-10-10-llm-hub/){:target="_blank" rel="noopener"} on Galaxy) fills the ELN fields the rules leave empty, e.g. sample and instrument. See [LLM-written ELN](#llm-written-eln). |
+| `llm_model` | LLM Hub **multimodal** model. Empty uses the harvest config's `llm_model` (`mistral-medium-3.5-e-infra.cz` on usegalaxy.eu). |
 | `notify_email` | Optional. One more address that gets the run's report, besides your NOMAD account's address. |
 | `galaxy_api_key` | Your Galaxy API key. Empty uses the worker's `GALAXY_API_KEY`, if the administrators set one. |
 | `zenodo_token` | Optional Zenodo token for larger search pages. Empty uses the worker's `ZENODO_TOKEN`, if set. |
@@ -137,6 +139,31 @@ failed after all batches ran. Its report is still written and emailed, with the 
 error; the email subject ends in "run failed". Fix the cause and start the Action again.
 Already processed files are not handled twice.
 
+### LLM-written ELN
+
+With `use_llm` on, the workflow asks LLM Hub to fill the empty ELN fields from the dataset's files (readme,
+paper text, raw file header). A value is kept only if the LLM quotes it from those files; the record's
+metadata (DOI, creators) always comes from Zenodo. Each converted file's folder in Galaxy has an ELN LLM
+report with every kept or dropped value and its reason.
+
+- **Model:** a value of LLM Hub's model list with type "Multimodal models" (on usegalaxy.eu, e.g.
+  `mistral-medium-3.5-e-infra.cz`, `gemma-4-31b-llmlb-freiburg`). Before the run, the Action checks it against the
+  list of your Galaxy server: a model from the form that is not there stops the run with the list of
+  choices; if the harvest config's model is gone, Galaxy's first multimodal model is used.
+- **No LLM Hub** on the Galaxy server: the run goes on without the LLM.
+- The report's batch table shows the model used, or `off` and why.
+- Import the workflow again after updating the plugin: older copies have no LLM inputs.
+
+### ELN user
+
+Each ELN, and so each NeXus file, has one user: you, the NOMAD user who runs the harvest, with your
+name, email and affiliation from your NOMAD account and the role "harvested and converted the data".
+People named in the dataset's files are not written as users; the Zenodo creators are the ELN's
+authors (`citeID`).
+
+These values are sent to Galaxy in the work list and stay in the run's Galaxy history. An
+administrator can turn this off with `eln_user: false` in the harvest config.
+
 ### Report
 
 Each run writes `report.json` and `report.md` into its run folder (and a copy into the
@@ -150,6 +177,10 @@ Settings that stay with the installation are in the harvest config file
 (`actions/zenodo_harvest/config/harvest_config.json`, or the file in the entry point's
 `harvest_config_path`). `state_dir` sets where the records of processed files are kept; empty
 means NOMAD's action artifacts folder.
+`llm_hub_tool_id` names Galaxy's LLM Hub tool (without version) and `llm_model` the default text
+model of the LLM-written ELN. `eln_user` (default on) writes the user who runs the harvest into the
+ELNs, see [ELN user](#eln-user). These three came with version 4 of the file; older files get them
+on load.
 
 The report email uses NOMAD's own mail server: the
 [`mail` section of `nomad.yaml`](https://docs.nomad-lab.eu/reference/config.html#mail){:target="_blank" rel="noopener"}.

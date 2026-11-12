@@ -58,6 +58,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     report_folder,
     run_galaxy,
     search_zenodo,
+    user_card,
     write_candidates,
     write_report,
     write_run_config,
@@ -254,6 +255,8 @@ def harvest_config_file(tmp_path, fake_zenodo, fake_nomad, monkeypatch):
         "zenodo_url": fake_zenodo.url,
         "zenodo_request_delay": 0,
         "nomad_url": fake_nomad.url,
+        # The user lookup asks NOMAD's Keycloak; tested with `user_card` instead.
+        "eln_user": False,
     }
     path = tmp_path / "harvest_config.json"
     path.write_text(json.dumps(content))
@@ -267,12 +270,21 @@ def harvest_config_file(tmp_path, fake_zenodo, fake_nomad, monkeypatch):
     return path
 
 
+# LLM Hub's models on usegalaxy.eu (2026-11-12), a few of each type.
+TEXT_MODELS = ["gpt-oss-120b-e-infra.cz", "glm-5-e-infra.cz", "glm-5.3-e-infra.cz"]
+MULTIMODAL_MODELS = ["gemma-3-27b-llmlb-freiburg", "mistral-medium-3.5-e-infra.cz"]
+
+
 @pytest.fixture
-def galaxy_config(harvest_config_file, fake_galaxy, monkeypatch):
-    """Extend the harvest config so Galaxy requests go to the local fake server."""
+def galaxy_config(harvest_config_file, fake_galaxy, monkeypatch, llm_hub_form):
+    """Extend the harvest config so Galaxy requests go to the local fake server,
+    which has LLM Hub with some of usegalaxy.eu's models."""
     content = json.loads(harvest_config_file.read_text())
     content |= {"galaxy_url": fake_galaxy.url, "galaxy_workflow_id": "wf-1"}
     harvest_config_file.write_text(json.dumps(content))
+    fake_galaxy.tool_forms[content["llm_hub_tool_id"]] = llm_hub_form(
+        TEXT_MODELS, MULTIMODAL_MODELS
+    )
     monkeypatch.setenv("GALAXY_API_KEY", "test-key")
     return fake_galaxy
 
@@ -559,8 +571,95 @@ def test_run_galaxy_activity(tmp_path, galaxy_config):
     assert galaxy_config.uploaded == path.read_bytes()
     assert galaxy_config.history_payload["name"] == "zenodo-harvest-run-1"
     payload = galaxy_config.invocation_payload
-    assert payload["inputs"] == {"0": {"src": "hda", "id": "in-1"}}
+    # Work list, LLM on (default) and the config's model.
+    assert payload["inputs"] == {
+        "0": {"src": "hda", "id": "in-1"},
+        "2": True,
+        "3": "mistral-medium-3.5-e-infra.cz",
+    }
+    assert result.llm == "mistral-medium-3.5-e-infra.cz"
     assert ("POST", "/api/workflows/wf-1/invocations") in galaxy_config.requests
+
+
+def _run_galaxy_llm(**form) -> tuple:
+    """Run run_galaxy with these form values; its result and LLM note."""
+    path = _work_list(Path(form.pop("run_dir")))
+    result = ActivityEnvironment().run(
+        run_galaxy, RunGalaxyInput(work_list_path=str(path), run_id="run-1", **form)
+    )
+    return result, result.llm
+
+
+def _parameter_inputs(galaxy) -> dict:
+    return {k: v for k, v in galaxy.invocation_payload["inputs"].items() if k != "0"}
+
+
+def test_llm_model_from_the_form(tmp_path, galaxy_config):
+    _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="gemma-3-27b-llmlb-freiburg")
+
+    assert _parameter_inputs(galaxy_config) == {
+        "2": True,
+        "3": "gemma-3-27b-llmlb-freiburg",
+    }
+    assert llm == "gemma-3-27b-llmlb-freiburg"
+
+
+def test_llm_off_in_the_form_asks_galaxy_nothing(tmp_path, galaxy_config):
+    _, llm = _run_galaxy_llm(run_dir=tmp_path, use_llm=False)
+
+    assert _parameter_inputs(galaxy_config) == {"2": False}
+    assert llm == "off (form)"
+    assert not [r for r in galaxy_config.requests if r[1].endswith("/build")]
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "no-such-model",
+        # A text model: the workflow's LLM Hub step takes multimodal models only.
+        "gpt-oss-120b-e-infra.cz",
+    ],
+)
+def test_llm_model_from_the_form_must_be_a_text_model(tmp_path, galaxy_config, model):
+    with pytest.raises(ApplicationError, match="not a multimodal model") as error:
+        _run_galaxy_llm(run_dir=tmp_path, llm_model=model)
+
+    assert error.value.non_retryable
+    assert "mistral-medium-3.5-e-infra.cz" in str(error.value)  # the choices are listed
+    assert galaxy_config.invocation_payload == {}
+
+
+def test_config_model_not_on_the_server_falls_back(
+    tmp_path, galaxy_config, harvest_config_file
+):
+    content = json.loads(harvest_config_file.read_text())
+    harvest_config_file.write_text(json.dumps(content | {"llm_model": "old-model"}))
+
+    _, llm = _run_galaxy_llm(run_dir=tmp_path)
+
+    # Galaxy's default: the first text model.
+    assert _parameter_inputs(galaxy_config) == {"2": True, "3": MULTIMODAL_MODELS[0]}
+    assert llm == f"{MULTIMODAL_MODELS[0]} (config's 'old-model' not available)"
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        None,  # LLM Hub is not installed
+        "no multimodal models",
+    ],
+)
+def test_no_llm_hub_turns_the_llm_off(tmp_path, galaxy_config, llm_hub_form, form):
+    tool_id = next(iter(galaxy_config.tool_forms))
+    if form is None:
+        galaxy_config.tool_forms.clear()
+    else:
+        galaxy_config.tool_forms[tool_id] = llm_hub_form(TEXT_MODELS, [])
+
+    _, llm = _run_galaxy_llm(run_dir=tmp_path)
+
+    assert _parameter_inputs(galaxy_config) == {"2": False}
+    assert llm == f"off: no multimodal models of {tool_id} on this Galaxy"
 
 
 def test_galaxy_needs_api_key(tmp_path, galaxy_config, monkeypatch):
@@ -1247,8 +1346,8 @@ async def test_each_record_is_its_own_galaxy_run(actions_fs, nomad_config, fake_
     text = (run_dir / REPORT_MARKDOWN_FILE).read_text()
     assert "| Galaxy | ok: 2 batches |" in text
     assert (
-        f"| batch-002 | {SECOND} | hist-1 | ok: 1 created, 0 reused, 0 left out |"
-        in (text)
+        f"| batch-002 | {SECOND} | hist-1 | mistral-medium-3.5-e-infra.cz | "
+        "ok: 1 created, 0 reused, 0 left out |" in (text)
     )
 
 
@@ -1602,3 +1701,35 @@ def test_email_report_with_incomplete_smtp(tmp_path, monkeypatch):
     with pytest.raises(ApplicationError, match="mail.from_address") as error:
         ActivityEnvironment().run(email_report, _email_input(tmp_path))
     assert error.value.non_retryable
+
+
+# The ELN's user (task 8): a real NOMAD user object, without NOMAD's user management.
+
+
+def test_user_card_of_a_nomad_user():
+    from nomad.datamodel import User  # noqa: PLC0415
+
+    user = User(
+        user_id="u1",
+        first_name="Ada",
+        last_name="Lovelace",
+        email="ada@example.org",
+        affiliation="Example Institute",
+        affiliation_address="1 Example Street, Berlin",
+    )
+
+    assert user_card(user) == {
+        "name": "Ada Lovelace",
+        "email": "ada@example.org",
+        "affiliation": "Example Institute",
+        "address": "1 Example Street, Berlin",
+    }
+
+
+def test_user_card_keeps_only_the_values_a_user_has():
+    from nomad.datamodel import User  # noqa: PLC0415
+
+    card = user_card(User(user_id="u1", first_name="Ada", last_name="Lovelace"))
+
+    assert card == {"name": "Ada Lovelace"}
+    assert user_card(None) is None

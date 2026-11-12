@@ -29,6 +29,14 @@ ZENODO_QUERY_EXAMPLES = [
     "(STM OR AFM) AND Nanonis AND access_right:open",
 ]
 
+# Multimodal models of LLM Hub on usegalaxy.eu (2026-11-12): the workflow uses
+# "Multimodal models" only. Qwen3.8-27B is left out: it ran out of tokens.
+LLM_MODEL_EXAMPLES = [
+    "mistral-medium-3.5-e-infra.cz",
+    "mistral-small-4-llmlb-freiburg",
+    "gemma-4-31b-llmlb-freiburg",
+]
+
 
 def _normalize_extensions(values: list[str] | None) -> list[str] | None:
     """`SXM`, `.sxm ` → `.sxm`; empty entries and repeats are dropped."""
@@ -50,6 +58,7 @@ class ConfigOverrides(BaseModel):
     zenodo_query: str | None = Field(
         None, description="Replaces the config's zenodo_query."
     )
+    llm_model: str | None = Field(None, description="Replaces the config's llm_model.")
 
 
 class ZenodoHarvestWorkflowInput(BaseModel):
@@ -116,6 +125,17 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         description="Also convert raw files already in one of your NOMAD projects. "
         "Example: off",
     )
+    use_llm: bool = Field(
+        True,
+        description="An LLM (Galaxy's LLM Hub) fills empty ELN fields; only values "
+        "quoted from the dataset are kept. Example: on",
+    )
+    llm_model: str | None = Field(
+        None,
+        description="LLM Hub multimodal model; empty uses the harvest config. Click "
+        "for more examples. Example: mistral-medium-3.5-e-infra.cz",
+        examples=LLM_MODEL_EXAMPLES,
+    )
     notify_email: str | None = Field(
         None,
         pattern=EMAIL_PATTERN,
@@ -154,7 +174,7 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         return ids
 
     @field_validator(
-        "galaxy_workflow_id", "zenodo_query", "notify_email", mode="before"
+        "galaxy_workflow_id", "zenodo_query", "llm_model", "notify_email", mode="before"
     )
     @classmethod
     def _empty_is_none(cls, value: str | None) -> str | None:
@@ -186,6 +206,7 @@ class ZenodoHarvestWorkflowInput(BaseModel):
             "galaxy_workflow_id": self.galaxy_workflow_id,
             "raw_extensions": self.raw_extensions,
             "zenodo_query": self.zenodo_query,
+            "llm_model": self.llm_model,
         }
 
 
@@ -300,11 +321,15 @@ class RunGalaxyInput(GalaxyKeyInput, ConfigOverrides):
 
     work_list_path: str
     run_id: str
+    use_llm: bool = Field(True, description="Run the workflow's LLM ELN step.")
 
 
 class RunGalaxyResult(BaseModel):
     history_id: str
     invocation_id: str
+    llm: str = Field(
+        "off", description="LLM of the ELN step: the model, or off and why."
+    )
 
 
 class PollGalaxyInput(GalaxyKeyInput):

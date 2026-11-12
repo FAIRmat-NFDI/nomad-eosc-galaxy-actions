@@ -122,8 +122,12 @@ REPORT_MARKDOWN_FILE = "report.md"
 # Folder of the state project with one subfolder per run, named by its start
 # time; NOMAD's file browser shows these files.
 REPORTS_FOLDER = "reports"
-# Step index of the work list input in the harvest's Galaxy workflow.
+# Step indices of the harvest workflow's inputs (step 1: prefetched files).
 GALAXY_WORK_LIST_STEP = "0"
+GALAXY_USE_LLM_STEP = "2"
+GALAXY_LLM_MODEL_STEP = "3"
+# The workflow's LLM Hub step uses this model type; Galaxy cannot set it from an input.
+LLM_HUB_MODEL_TYPE = "multimodal"
 # Zenodo allows larger pages for authenticated requests.
 PAGE_SIZE_ANONYMOUS = 25
 PAGE_SIZE_AUTHENTICATED = 100
@@ -441,6 +445,7 @@ def build_work_list(data: BuildWorkListInput) -> BuildWorkListResult:
             run_id=data.run_id,
             max_records=data.max_records,
             in_projects=in_projects,
+            user=_nomad_user_card(data.user_id) if harvest_config.eln_user else None,
         )
     path = write_work_list(data.run_dir, content, skipped)
     records = content["records"]
@@ -529,17 +534,68 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     never written to the run's files, logs or Galaxy parameters.
     """
     harvest_config = _harvest_config(data)
+    api_key = _secret("galaxy", data.galaxy_api_key)
+    model, llm = _llm_model(data, harvest_config, api_key)
+    inputs: dict[str, Any] = {GALAXY_USE_LLM_STEP: model is not None}
+    if model:
+        inputs[GALAXY_LLM_MODEL_STEP] = model
     result = galaxy_client.upload_and_invoke(
-        api_key=_secret("galaxy", data.galaxy_api_key),
+        api_key=api_key,
         workflow_id=harvest_config.galaxy_workflow_id,
         file_path=data.work_list_path,
         file_type="json",
         workflow_input_step=GALAXY_WORK_LIST_STEP,
+        parameter_inputs=inputs,
         history_name=f"zenodo-harvest-{data.run_id}",
         galaxy_url=harvest_config.galaxy_url,
     )
-    activity.logger.info("Galaxy invocation %s started", result["invocation_id"])
-    return RunGalaxyResult(**result)
+    activity.logger.info(
+        "Galaxy invocation %s started; LLM: %s", result["invocation_id"], llm
+    )
+    return RunGalaxyResult(**result, llm=llm)
+
+
+def llm_hub_models(form: dict[str, Any], model_type: str) -> list[str]:
+    """The models of one type in LLM Hub's form, in Galaxy's order (the first is
+    Galaxy's default)."""
+    for item in form.get("inputs", []):
+        if item.get("type") != "conditional":
+            continue
+        for case in item.get("cases", []):
+            if case.get("value") != model_type:
+                continue
+            for param in case.get("inputs", []):
+                if param.get("name") == "model":
+                    return [option[1] for option in param.get("options", [])]
+    return []
+
+
+def _llm_model(
+    data: RunGalaxyInput, harvest_config: HarvestConfig, api_key: str
+) -> tuple[str | None, str]:
+    """The LLM Hub model of the ELN step (None: LLM off) and a note for the report.
+
+    The model must be one of LLM Hub's models of the workflow's type on the Galaxy
+    server. A model from the form that is not there stops the run; the config's
+    default falls back to Galaxy's first model of that type.
+    """
+    if not data.use_llm:
+        return None, "off (form)"
+    tool_id = harvest_config.llm_hub_tool_id
+    form = galaxy_client.tool_form(api_key, tool_id, harvest_config.galaxy_url)
+    models = llm_hub_models(form, LLM_HUB_MODEL_TYPE) if form else []
+    if not models:
+        return None, f"off: no {LLM_HUB_MODEL_TYPE} models of {tool_id} on this Galaxy"
+    model = harvest_config.llm_model
+    if model in models:
+        return model, model
+    if data.llm_model:
+        raise ApplicationError(
+            f"LLM model {model!r} is not a {LLM_HUB_MODEL_TYPE} model of LLM Hub on "
+            f"{harvest_config.galaxy_url}; choose one of: {', '.join(models)}",
+            non_retryable=True,
+        )
+    return models[0], f"{models[0]} (config's {model!r} not available)"
 
 
 @activity.defn
@@ -879,6 +935,28 @@ def write_report(data: WriteReportInput) -> WriteReportResult:
 def recipients(user_email: str | None, notify_email: str | None) -> str:
     """The `To` header: the user's address and the extra one, without repeats."""
     return ", ".join(dict.fromkeys(a for a in (user_email, notify_email) if a))
+
+
+def user_card(user: Any) -> dict[str, str] | None:
+    """The ELN's user from a NOMAD user: the values it has of name, email,
+    affiliation and address; None for no user."""
+    if user is None:
+        return None
+    card = {
+        "name": user.name,
+        "email": user.email,
+        "affiliation": user.affiliation,
+        "address": user.affiliation_address,
+    }
+    return {key: value for key, value in card.items() if value} or None
+
+
+def _nomad_user_card(user_id: str) -> dict[str, str] | None:
+    """The ELN's user: the NOMAD user who runs the harvest (needs NOMAD's user
+    management)."""
+    from nomad import datamodel  # noqa: PLC0415
+
+    return user_card(datamodel.User.get(user_id=user_id))
 
 
 def _user_email(user_id: str) -> str | None:
