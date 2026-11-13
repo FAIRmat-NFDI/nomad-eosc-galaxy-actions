@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "nomad-lab>=1.4.3",
     "bioblend",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +53,7 @@ dev = [
 [project.entry-points.'nomad.plugin']
 find_peaks_action = "nomad_eosc_galaxy_actions.actions.find_peaks:find_peaks_action"
 find_peaks_example_upload = "nomad_eosc_galaxy_actions.example_uploads:find_peaks_example_upload"
+zenodo_harvest_action = "nomad_eosc_galaxy_actions.actions.zenodo_harvest:zenodo_harvest_action"
 
 
 [tool.setuptools.packages.find]
@@ -60,6 +62,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 nomad_eosc_galaxy_actions = [
     "actions/find_peaks/data/*.ga",
+    "actions/zenodo_harvest/config/*.json",
     "example_uploads/find_peaks/*",
 ]
 

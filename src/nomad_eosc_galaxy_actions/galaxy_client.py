@@ -48,6 +48,7 @@ def upload_and_invoke(  # noqa: PLR0913
     file_type: str = "auto",
     workflow_input_step: str = "0",
     tool_params: dict[str, dict[str, Any]] | None = None,
+    parameter_inputs: dict[str, Any] | None = None,
     history_name: str | None = None,
     galaxy_url: str = GALAXY_URL,
 ) -> dict[str, str]:
@@ -64,6 +65,8 @@ def upload_and_invoke(  # noqa: PLR0913
         tool_params: `{step_index: {param_name: value, ...}, ...}`, forwarded
             to `invoke_workflow`'s `params` as-is — shape depends entirely on
             the target tool(s)' own parameters.
+        parameter_inputs: `{step_index: value}` for the workflow's parameter
+            inputs (text, boolean, ...); unset ones keep their default.
         history_name: defaults to the uploaded file's stem if not given.
 
     Returns:
@@ -84,7 +87,10 @@ def upload_and_invoke(  # noqa: PLR0913
 
     invocation = gi.workflows.invoke_workflow(
         workflow_id,
-        inputs={workflow_input_step: {"src": "hda", "id": input_dataset_id}},
+        inputs={
+            workflow_input_step: {"src": "hda", "id": input_dataset_id},
+            **(parameter_inputs or {}),
+        },
         params=tool_params,
         history_id=history["id"],
         inputs_by="step_index",
@@ -106,7 +112,8 @@ def poll_invocation(
     * Each job's own outputs, keyed by the tool's output parameter names.
     * invocation["outputs"], keyed by labels declared as workflow outputs
     via workflow_outputs in the .ga file. These override job outputs
-    with the same name.
+    with the same name. Labelled collection outputs (invocation
+    ["output_collections"]) are added the same way, with collection IDs.
     """
     gi = get_instance(api_key, galaxy_url)
     invocation = gi.invocations.show_invocation(invocation_id)
@@ -126,10 +133,23 @@ def poll_invocation(
     outputs: dict[str, str] = {}
     for job in jobs:
         outputs.update({name: ref["id"] for name, ref in job["outputs"].items()})
-    outputs.update(
-        {name: ref["id"] for name, ref in invocation.get("outputs", {}).items()}
-    )
+    for key in ("outputs", "output_collections"):
+        outputs.update(
+            {name: ref["id"] for name, ref in invocation.get(key, {}).items()}
+        )
     return {"done": True, "state": "ok", "outputs": outputs}
+
+
+def collection_elements(
+    api_key: str, collection_id: str, galaxy_url: str = GALAXY_URL
+) -> dict[str, str]:
+    """Element identifiers → dataset IDs of a (flat) dataset collection."""
+    gi = get_instance(api_key, galaxy_url)
+    collection = gi.dataset_collections.show_dataset_collection(collection_id)
+    return {
+        element["element_identifier"]: element["object"]["id"]
+        for element in collection["elements"]
+    }
 
 
 def download_dataset(

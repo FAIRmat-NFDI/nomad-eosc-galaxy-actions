@@ -10,10 +10,11 @@ not threaded through as separately-passed fields that could drift out of
 sync) agrees on exactly what counts as a valid spectrum or API key.
 """
 
-import os
 from dataclasses import dataclass
 
 from pydantic import SecretStr
+
+from nomad_eosc_galaxy_actions.credentials import resolve_secret
 
 
 @dataclass
@@ -55,20 +56,10 @@ def resolve_spectrum(entry_id: str, user_id: str) -> ResolvedSpectrum:
 def resolve_api_key(secret: SecretStr | None) -> str:
     """Resolve the Galaxy API key to use: the one passed in the trigger's
     input if given, otherwise the worker's own GALAXY_API_KEY environment
-    variable (an institute-wide/shared key, per the "Institute-wide secrets"
-    pattern for NOMAD Actions).
+    variable (see `credentials.resolve_secret`).
 
     Raises:
         ValueError: neither a per-trigger key nor the environment variable
             is set.
     """
-    if secret is not None:
-        return secret.get_secret_value()
-
-    api_key = os.environ.get("GALAXY_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "No Galaxy API key given, and no GALAXY_API_KEY environment "
-            "variable set on the worker."
-        )
-    return api_key
+    return resolve_secret("galaxy", secret)
