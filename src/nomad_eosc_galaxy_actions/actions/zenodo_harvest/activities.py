@@ -126,8 +126,6 @@ REPORTS_FOLDER = "reports"
 GALAXY_WORK_LIST_STEP = "0"
 GALAXY_USE_LLM_STEP = "2"
 GALAXY_LLM_MODEL_STEP = "3"
-# The workflow's LLM Hub step uses this model type; Galaxy cannot set it from an input.
-LLM_HUB_MODEL_TYPE = "multimodal"
 # Zenodo allows larger pages for authenticated requests.
 PAGE_SIZE_ANONYMOUS = 25
 PAGE_SIZE_AUTHENTICATED = 100
@@ -535,10 +533,11 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     """
     harvest_config = _harvest_config(data)
     api_key = _secret("galaxy", data.galaxy_api_key)
-    model, llm = _llm_model(data, harvest_config, api_key)
-    inputs: dict[str, Any] = {GALAXY_USE_LLM_STEP: model is not None}
+    model = _llm_model(data, harvest_config)
+    inputs: dict[str, Any] = {GALAXY_USE_LLM_STEP: data.use_llm}
     if model:
         inputs[GALAXY_LLM_MODEL_STEP] = model
+    llm = model or "off (form)"
     result = galaxy_client.upload_and_invoke(
         api_key=api_key,
         workflow_id=harvest_config.galaxy_workflow_id,
@@ -555,47 +554,13 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     return RunGalaxyResult(**result, llm=llm)
 
 
-def llm_hub_models(form: dict[str, Any], model_type: str) -> list[str]:
-    """The models of one type in LLM Hub's form, in Galaxy's order (the first is
-    Galaxy's default)."""
-    for item in form.get("inputs", []):
-        if item.get("type") != "conditional":
-            continue
-        for case in item.get("cases", []):
-            if case.get("value") != model_type:
-                continue
-            for param in case.get("inputs", []):
-                if param.get("name") == "model":
-                    return [option[1] for option in param.get("options", [])]
-    return []
+def _llm_model(data: RunGalaxyInput, harvest_config: HarvestConfig) -> str | None:
+    """The LLM Hub model of the ELN step, or None when the LLM is off.
 
-
-def _llm_model(
-    data: RunGalaxyInput, harvest_config: HarvestConfig, api_key: str
-) -> tuple[str | None, str]:
-    """The LLM Hub model of the ELN step (None: LLM off) and a note for the report.
-
-    The model must be one of LLM Hub's models of the workflow's type on the Galaxy
-    server. A model from the form that is not there stops the run; the config's
-    default falls back to Galaxy's first model of that type.
+    The form's model, else the harvest config's. Not checked here: if the Galaxy
+    server lacks it, LLM Hub falls back to one of its multimodal models.
     """
-    if not data.use_llm:
-        return None, "off (form)"
-    tool_id = harvest_config.llm_hub_tool_id
-    form = galaxy_client.tool_form(api_key, tool_id, harvest_config.galaxy_url)
-    models = llm_hub_models(form, LLM_HUB_MODEL_TYPE) if form else []
-    if not models:
-        return None, f"off: no {LLM_HUB_MODEL_TYPE} models of {tool_id} on this Galaxy"
-    model = harvest_config.llm_model
-    if model in models:
-        return model, model
-    if data.llm_model:
-        raise ApplicationError(
-            f"LLM model {model!r} is not a {LLM_HUB_MODEL_TYPE} model of LLM Hub on "
-            f"{harvest_config.galaxy_url}; choose one of: {', '.join(models)}",
-            non_retryable=True,
-        )
-    return models[0], f"{models[0]} (config's {model!r} not available)"
+    return harvest_config.llm_model if data.use_llm else None
 
 
 @activity.defn

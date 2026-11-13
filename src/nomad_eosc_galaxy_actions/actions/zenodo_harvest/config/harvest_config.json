@@ -12,7 +12,6 @@
   "galaxy_url": "https://usegalaxy.eu",
   "galaxy_workflow_id": "",
   "eln_user": true,
-  "llm_hub_tool_id": "toolshed.g2.bx.psu.edu/repos/bgruening/llm_hub/llm_hub",
   "llm_model": "mistral-medium-3.5-e-infra.cz",
   "nomad_url": "",
   "state_dir": ""

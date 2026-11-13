@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from bioblend.galaxy import GalaxyInstance
 
@@ -97,23 +96,6 @@ def upload_and_invoke(  # noqa: PLR0913
         inputs_by="step_index",
     )
     return {"history_id": history["id"], "invocation_id": invocation["id"]}
-
-
-def tool_form(
-    api_key: str, tool_id: str, galaxy_url: str = GALAXY_URL
-) -> dict[str, Any] | None:
-    """A tool's form as Galaxy builds it (inputs, options, defaults), or None if
-    the server has no such tool.
-
-    `tool_id` may leave out the version (the newest is used). The ID is encoded,
-    since Tool Shed IDs contain slashes.
-    """
-    gi = get_instance(api_key, galaxy_url)
-    response = gi.make_get_request(f"{gi.url}/tools/{quote(tool_id, safe='')}/build")
-    if response.status_code in {400, 404}:
-        return None
-    response.raise_for_status()
-    return response.json()
 
 
 def poll_invocation(

@@ -148,7 +148,7 @@ def test_upgrade_from_middle_version():
 
 
 # Settings added by version 4.
-ELN_SETTINGS = ("eln_user", "llm_hub_tool_id", "llm_model")
+ELN_SETTINGS = ("eln_user", "llm_model")
 
 
 def _version_1(shipped: dict) -> dict:
@@ -173,10 +173,6 @@ def test_version_3_file_gets_the_eln_defaults(tmp_path, shipped):
     config = load_harvest_config(path)
     assert config.eln_user is True
     assert config.llm_model == "mistral-medium-3.5-e-infra.cz"
-    assert (
-        config.llm_hub_tool_id
-        == "toolshed.g2.bx.psu.edu/repos/bgruening/llm_hub/llm_hub"
-    )
 
 
 def test_version_3_file_with_an_llm_setting_is_refused(tmp_path, shipped):

@@ -11,7 +11,7 @@ import threading
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -106,32 +106,6 @@ def fake_zenodo():
     server.server_close()
 
 
-def build_llm_hub_form(text_models: list[str], multimodal_models: list[str]) -> dict:
-    """The part of LLM Hub's form (`/api/tools/{id}/build`) the Action reads: a
-    conditional on the model type, each case with its `model` options as
-    [label, value, selected] (Galaxy's shape)."""
-
-    def case(value: str, models: list[str]) -> dict:
-        options = [[f"Label of {m}", m, i == 0] for i, m in enumerate(models)]
-        model = {"name": "model", "type": "select", "options": options}
-        return {"value": value, "inputs": [model, {"name": "prompt", "type": "text"}]}
-
-    return {
-        "id": "toolshed.g2.bx.psu.edu/repos/bgruening/llm_hub/llm_hub/2.53.0+galaxy0",
-        "version": "2.53.0+galaxy0",
-        "inputs": [
-            {
-                "name": "model_condition",
-                "type": "conditional",
-                "cases": [
-                    case("multimodal", multimodal_models),
-                    case("text", text_models),
-                ],
-            }
-        ],
-    }
-
-
 class FakeGalaxy(ThreadingHTTPServer):
     """Local HTTP server answering the Galaxy API requests that bioblend sends
     for upload (tus), invoke, poll and download.
@@ -143,8 +117,7 @@ class FakeGalaxy(ThreadingHTTPServer):
     `invocation_outputs` to serve `results`. `collections` maps collection IDs
     to {element identifier: content}, served as datasets `<collection>-<identifier>`;
     label them in `invocation_collections`. `job_states` lists the job state
-    for each poll; the last one repeats. `tool_forms` maps tool IDs to the form
-    `GET /api/tools/{id}/build` returns (see `build_llm_hub_form`); others give 404.
+    for each poll; the last one repeats.
     """
 
     def __init__(self):
@@ -162,7 +135,6 @@ class FakeGalaxy(ThreadingHTTPServer):
         self.history_payload: dict = {}
         self.on_invoke = None
         self.work_lists: list[dict] = []
-        self.tool_forms: dict[str, dict] = {}
 
     @property
     def url(self) -> str:
@@ -203,17 +175,7 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
         self._send(204, None, {"Upload-Offset": str(len(self.server.uploaded))})
 
     def do_GET(self):
-        path = self._path()
-        if path.startswith("/api/tools/") and path.endswith("/build"):
-            self._send_tool_form(unquote(path[len("/api/tools/") : -len("/build")]))
-        else:
-            self._get(path)
-
-    def _send_tool_form(self, tool_id: str):
-        if form := self.server.tool_forms.get(tool_id):
-            self._send(200, form)
-        else:
-            self._send(404, {"err_msg": f"no tool {tool_id}"})
+        self._get(self._path())
 
     def _get(self, path: str):
         server = self.server
@@ -300,12 +262,6 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):  # keep test output quiet
         pass
-
-
-@pytest.fixture
-def llm_hub_form():
-    """Builds LLM Hub's form for `FakeGalaxy.tool_forms`."""
-    return build_llm_hub_form
 
 
 @pytest.fixture

@@ -12,6 +12,9 @@ from typing import Any
 from pydantic import BaseModel, Field, SecretStr, field_serializer, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
+    DEFAULT_LLM_MODEL,
+)
 from nomad_eosc_galaxy_actions.credentials import reveal
 
 # Raw file extensions that pynxtools-spm can read (pynxtools_spm/reader.py).
@@ -131,9 +134,9 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "quoted from the dataset are kept. Example: on",
     )
     llm_model: str | None = Field(
-        None,
-        description="LLM Hub multimodal model; empty uses the harvest config. Click "
-        "for more examples. Example: mistral-medium-3.5-e-infra.cz",
+        DEFAULT_LLM_MODEL,
+        description="LLM Hub multimodal model; empty: the config's; unknown: LLM Hub "
+        "picks one. Example: gemma-4-31b-llmlb-freiburg",
         examples=LLM_MODEL_EXAMPLES,
     )
     notify_email: str | None = Field(

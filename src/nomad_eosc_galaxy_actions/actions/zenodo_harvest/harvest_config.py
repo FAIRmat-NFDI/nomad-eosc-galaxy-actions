@@ -21,9 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 # values. When the layout changes: bump it and add an upgrade to UPGRADES.
 HARVEST_CONFIG_SCHEMA_VERSION = 4
 DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "config" / "harvest_config.json"
-# LLM Hub on usegalaxy.eu, without version (the newest is used), and a multimodal model
-# there: it gave the best ELN in a comparison (2026-11-12).
-DEFAULT_LLM_HUB_TOOL_ID = "toolshed.g2.bx.psu.edu/repos/bgruening/llm_hub/llm_hub"
+# A multimodal model of LLM Hub on usegalaxy.eu: it gave the best ELN in a comparison
+# (2026-11-12).
 DEFAULT_LLM_MODEL = "mistral-medium-3.5-e-infra.cz"
 
 
@@ -48,9 +47,8 @@ def _add_state_dir(content: dict[str, Any]) -> dict[str, Any]:
 
 
 def _add_eln_settings(content: dict[str, Any]) -> dict[str, Any]:
-    """Version 4 adds the ELN settings: the run's user, LLM Hub and its model."""
+    """Version 4 adds the ELN settings: the run's user and the LLM Hub model."""
     content = _add_setting(content, "eln_user", True)
-    content = _add_setting(content, "llm_hub_tool_id", DEFAULT_LLM_HUB_TOOL_ID)
     return _add_setting(content, "llm_model", DEFAULT_LLM_MODEL)
 
 
@@ -133,12 +131,6 @@ class HarvestConfig(BaseModel):
         description=(
             "Write the NOMAD user who runs the harvest (name, email, affiliation) "
             "into the ELNs; it is sent to Galaxy in the work list."
-        )
-    )
-    llm_hub_tool_id: str = Field(
-        description=(
-            "ID of Galaxy's LLM Hub tool, used to read its model list; without "
-            "version, the newest is used."
         )
     )
     llm_model: str = Field(

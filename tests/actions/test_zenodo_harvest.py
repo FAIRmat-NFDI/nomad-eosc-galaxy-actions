@@ -270,21 +270,12 @@ def harvest_config_file(tmp_path, fake_zenodo, fake_nomad, monkeypatch):
     return path
 
 
-# LLM Hub's models on usegalaxy.eu (2026-11-12), a few of each type.
-TEXT_MODELS = ["gpt-oss-120b-e-infra.cz", "glm-5-e-infra.cz", "glm-5.3-e-infra.cz"]
-MULTIMODAL_MODELS = ["gemma-3-27b-llmlb-freiburg", "mistral-medium-3.5-e-infra.cz"]
-
-
 @pytest.fixture
-def galaxy_config(harvest_config_file, fake_galaxy, monkeypatch, llm_hub_form):
-    """Extend the harvest config so Galaxy requests go to the local fake server,
-    which has LLM Hub with some of usegalaxy.eu's models."""
+def galaxy_config(harvest_config_file, fake_galaxy, monkeypatch):
+    """Extend the harvest config so Galaxy requests go to the local fake server."""
     content = json.loads(harvest_config_file.read_text())
     content |= {"galaxy_url": fake_galaxy.url, "galaxy_workflow_id": "wf-1"}
     harvest_config_file.write_text(json.dumps(content))
-    fake_galaxy.tool_forms[content["llm_hub_tool_id"]] = llm_hub_form(
-        TEXT_MODELS, MULTIMODAL_MODELS
-    )
     monkeypatch.setenv("GALAXY_API_KEY", "test-key")
     return fake_galaxy
 
@@ -604,62 +595,30 @@ def test_llm_model_from_the_form(tmp_path, galaxy_config):
     assert llm == "gemma-3-27b-llmlb-freiburg"
 
 
-def test_llm_off_in_the_form_asks_galaxy_nothing(tmp_path, galaxy_config):
+def test_llm_off_in_the_form(tmp_path, galaxy_config):
     _, llm = _run_galaxy_llm(run_dir=tmp_path, use_llm=False)
 
     assert _parameter_inputs(galaxy_config) == {"2": False}
     assert llm == "off (form)"
-    assert not [r for r in galaxy_config.requests if r[1].endswith("/build")]
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "no-such-model",
-        # A text model: the workflow's LLM Hub step takes multimodal models only.
-        "gpt-oss-120b-e-infra.cz",
-    ],
-)
-def test_llm_model_from_the_form_must_be_a_text_model(tmp_path, galaxy_config, model):
-    with pytest.raises(ApplicationError, match="not a multimodal model") as error:
-        _run_galaxy_llm(run_dir=tmp_path, llm_model=model)
-
-    assert error.value.non_retryable
-    assert "mistral-medium-3.5-e-infra.cz" in str(error.value)  # the choices are listed
-    assert galaxy_config.invocation_payload == {}
-
-
-def test_config_model_not_on_the_server_falls_back(
-    tmp_path, galaxy_config, harvest_config_file
-):
+def test_empty_form_model_uses_the_config(tmp_path, galaxy_config, harvest_config_file):
     content = json.loads(harvest_config_file.read_text())
-    harvest_config_file.write_text(json.dumps(content | {"llm_model": "old-model"}))
+    harvest_config_file.write_text(json.dumps(content | {"llm_model": "config-model"}))
 
-    _, llm = _run_galaxy_llm(run_dir=tmp_path)
+    _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="")
 
-    # Galaxy's default: the first text model.
-    assert _parameter_inputs(galaxy_config) == {"2": True, "3": MULTIMODAL_MODELS[0]}
-    assert llm == f"{MULTIMODAL_MODELS[0]} (config's 'old-model' not available)"
+    assert _parameter_inputs(galaxy_config) == {"2": True, "3": "config-model"}
+    assert llm == "config-model"
 
 
-@pytest.mark.parametrize(
-    "form",
-    [
-        None,  # LLM Hub is not installed
-        "no multimodal models",
-    ],
-)
-def test_no_llm_hub_turns_the_llm_off(tmp_path, galaxy_config, llm_hub_form, form):
-    tool_id = next(iter(galaxy_config.tool_forms))
-    if form is None:
-        galaxy_config.tool_forms.clear()
-    else:
-        galaxy_config.tool_forms[tool_id] = llm_hub_form(TEXT_MODELS, [])
+def test_model_is_sent_without_a_check(tmp_path, galaxy_config):
+    # The Action does not ask Galaxy for its models; LLM Hub falls back itself.
+    _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="no-such-model")
 
-    _, llm = _run_galaxy_llm(run_dir=tmp_path)
-
-    assert _parameter_inputs(galaxy_config) == {"2": False}
-    assert llm == f"off: no multimodal models of {tool_id} on this Galaxy"
+    assert _parameter_inputs(galaxy_config) == {"2": True, "3": "no-such-model"}
+    assert llm == "no-such-model"
+    assert not [r for r in galaxy_config.requests if r[1].endswith("/build")]
 
 
 def test_galaxy_needs_api_key(tmp_path, galaxy_config, monkeypatch):
