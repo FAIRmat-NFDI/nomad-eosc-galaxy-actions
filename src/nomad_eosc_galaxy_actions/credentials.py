@@ -32,23 +32,31 @@ def resolve_secret(
     form_value: SecretStr | None,
     *,
     required: bool = True,
+    worker: bool = True,
     environ: Mapping[str, str] | None = None,
 ) -> str | None:
     """The secret for `service`: the form value, else the environment variable.
 
+    `worker=False` never uses the environment variable, e.g. for a server
+    that the form chose: the worker's secret belongs to the configured one.
+
     Raises:
-        MissingSecretError: `required`, but neither is set.
+        MissingSecretError: `required`, but no allowed value is set.
     """
+    name = ENV_VARS[service]
     if form_value is not None and form_value.get_secret_value():
         return form_value.get_secret_value()
-    name = ENV_VARS[service]
-    value = (os.environ if environ is None else environ).get(name)
+    value = (os.environ if environ is None else environ).get(name) if worker else None
     if value:
         return value
     if required:
+        reason = (
+            f"no {name} environment variable set on the worker"
+            if worker
+            else f"the worker's {name} is only sent to the harvest config's server"
+        )
         raise MissingSecretError(
-            f"No {service} secret in the Action form, and no {name} "
-            "environment variable set on the worker."
+            f"No {service} secret in the Action form, and {reason}."
         )
     return None
 

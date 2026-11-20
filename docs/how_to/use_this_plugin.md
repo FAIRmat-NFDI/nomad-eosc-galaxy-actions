@@ -24,9 +24,9 @@ datasets on Zenodo, converts their raw files to NeXus on Galaxy and stores each 
 private NOMAD project, with one folder per record version. It remembers what it has processed, so the
 next run only handles new files.
 
-The form lists the raw file extensions to convert; by default, all that
-[pynxtools-spm](https://github.com/FAIRmat-NFDI/pynxtools-spm){:target="_blank" rel="noopener"} reads.
-For more SPM techniques, also widen `zenodo_query` in the harvest config.
+Most form fields are empty by default: an empty field uses the value of the harvest config (see
+[Worker settings](#worker-settings)). A list in the form replaces the config's list for this run. To
+extend a list, enter the config's items and the new ones.
 
 Start it from **Actions** in the main menu. No project needs to be selected.
 
@@ -35,10 +35,16 @@ Start it from **Actions** in the main menu. No project needs to be selected.
 | Field | Meaning |
 |---|---|
 | `dry_run` | Default on. Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. |
+| `galaxy_url` | Galaxy server. Empty uses the harvest config's `galaxy_url`. If set, `galaxy_api_key` is required: the worker's key is only sent to the config's Galaxy. |
 | `galaxy_workflow_id` | ID of the harvest workflow in your Galaxy account. Empty uses the harvest config's `galaxy_workflow_id`. |
+| `zenodo_url` | Zenodo server, e.g. `https://sandbox.zenodo.org`. Empty uses the harvest config's `zenodo_url`. If set, the worker's `ZENODO_TOKEN` is not sent. |
+| `zenodo_request_delay` | Seconds between Zenodo requests. Empty, or shorter than the harvest config's, uses the config's value. |
 | `zenodo_query` | Zenodo search query ([search syntax](https://help.zenodo.org/guides/search/){:target="_blank" rel="noopener"}). Empty uses the harvest config's `zenodo_query`. |
 | `zenodo_record_ids` | Only these Zenodo records, in place of the query. A concept record ID means its latest version. Unknown IDs are reported as `not_found`. |
-| `raw_extensions` | Raw file extensions converted to NeXus. Default `.sxm`, `.dat`, `.sm4`, `.spm`, `.flt`. Written in any case, with or without the dot. |
+| `raw_extensions` | Raw file extensions converted to NeXus. Written in any case, with or without the dot. Replaces the config's list. |
+| `context_extensions` | Extensions of files that describe the experiment, sent along with each raw file. Replaces the config's list. |
+| `ignore_patterns` | Glob patterns of files that are skipped, e.g. `__MACOSX/*`. Replaces the config's list. |
+| `licenses` | Zenodo license IDs to accept, e.g. `cc-by-4.0`. Only the config's licenses are allowed; empty accepts all of them. |
 | `max_records` | Process at most this many Zenodo records with new work. Empty means no limit. |
 | `records_per_work_list` | Default 1. Zenodo records sent to Galaxy together in one work list; each work list is one Galaxy run. Empty means all records in one work list. Example: `max_records` 6 and `records_per_work_list` 2 → 6 records in 3 Galaxy runs of 2 records. |
 | `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). Empty means one run. |
@@ -175,7 +181,9 @@ duplicates included. It is emailed to the address of your NOMAD account.
 
 Settings that stay with the installation are in the harvest config file
 (`actions/zenodo_harvest/config/harvest_config.json`, or the file in the entry point's
-`harvest_config_path`). `state_dir` sets where the records of processed files are kept; empty
+`harvest_config_path`). `schema_version`, `max_archive_bytes`, `max_uncompressed_bytes`,
+`nomad_url`, `state_dir` and `eln_user` are only set here; the other settings are defaults for the
+form. `state_dir` sets where the records of processed files are kept; empty
 means NOMAD's action artifacts folder.
 `llm_model` is the LLM Hub model used when the form's model is empty. `eln_user` (default on) writes
 the user who runs the harvest into the ELNs, see [ELN user](#eln-user). Both came with version 4 of

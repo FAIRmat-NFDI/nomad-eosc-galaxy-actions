@@ -364,7 +364,9 @@ class ZenodoHarvestWorkflow:
             polled = await workflow.execute_activity(
                 poll_galaxy,
                 PollGalaxyInput(
-                    invocation_id=started.invocation_id, galaxy_api_key=galaxy_api_key
+                    invocation_id=started.invocation_id,
+                    galaxy_api_key=galaxy_api_key,
+                    **data.config_overrides(),
                 ),
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=retry_policy,
@@ -395,6 +397,7 @@ class ZenodoHarvestWorkflow:
                 manifest_dataset_id=polled.outputs[GALAXY_MANIFEST_OUTPUT],
                 results_dataset_id=polled.outputs.get(GALAXY_RESULTS_OUTPUT),
                 galaxy_api_key=galaxy_api_key,
+                **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(minutes=30),
             retry_policy=retry_policy,
@@ -432,6 +435,7 @@ class ZenodoHarvestWorkflow:
                 run_dir=run_dir,
                 collection_id=collection_id,
                 galaxy_api_key=data.galaxy_api_key,
+                **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(hours=2),
             retry_policy=retry_policy,
@@ -444,6 +448,7 @@ class ZenodoHarvestWorkflow:
                 results_path=fetched.results_path,
                 user_id=data.user_id,
                 zip_paths=downloaded.zip_paths,
+                **data.config_overrides(),
             ),
             start_to_close_timeout=timedelta(hours=2),
             retry_policy=retry_policy,

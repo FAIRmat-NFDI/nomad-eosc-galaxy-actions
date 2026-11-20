@@ -19,6 +19,20 @@ def test_form_value_wins():
     assert resolve_secret("galaxy", SecretStr("form-key"), environ=ENV) == "form-key"
 
 
+def test_form_value_wins_without_the_worker():
+    value = resolve_secret("galaxy", SecretStr("form-key"), worker=False, environ=ENV)
+    assert value == "form-key"
+
+
+def test_worker_secret_is_not_used_when_not_allowed():
+    with pytest.raises(MissingSecretError, match="only sent to the harvest config"):
+        resolve_secret("galaxy", None, worker=False, environ=ENV)
+    assert (
+        resolve_secret("zenodo", None, required=False, worker=False, environ=ENV)
+        is None
+    )
+
+
 @pytest.mark.parametrize("form_value", [None, SecretStr("")])
 def test_empty_form_falls_back_to_the_worker(form_value):
     assert resolve_secret("galaxy", form_value, environ=ENV) == "worker-key"

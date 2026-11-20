@@ -374,6 +374,32 @@ def test_search_zenodo_activity_uses_the_form_query(
     assert (content["query"], content["record_ids"]) == ("AFM", None)
 
 
+def test_worker_token_is_not_sent_to_the_form_zenodo(
+    tmp_path, fake_zenodo, harvest_config_file, monkeypatch
+):
+    monkeypatch.setenv("ZENODO_TOKEN", "worker-token")
+
+    ActivityEnvironment().run(
+        search_zenodo,
+        SearchZenodoInput(run_dir=str(tmp_path), zenodo_url=fake_zenodo.url),
+    )
+
+    assert fake_zenodo.auth_headers  # requests were sent, all without the token
+    assert set(fake_zenodo.auth_headers) == {None}
+
+
+def test_form_license_outside_the_config_stops_the_run(
+    tmp_path, fake_zenodo, harvest_config_file
+):
+    with pytest.raises(ApplicationError, match="not accepted") as error:
+        ActivityEnvironment().run(
+            search_zenodo,
+            SearchZenodoInput(run_dir=str(tmp_path), licenses=["cc-by-nc-4.0"]),
+        )
+    assert error.value.non_retryable
+    assert fake_zenodo.requests == []
+
+
 @pytest.mark.asyncio
 async def test_workflow_runs_all_steps(actions_fs, harvest_config_file):
     max_records = 2
@@ -630,6 +656,19 @@ def test_galaxy_needs_api_key(tmp_path, galaxy_config, monkeypatch):
             run_galaxy, RunGalaxyInput(work_list_path=str(path), run_id="run-1")
         )
     assert error.value.non_retryable
+    assert galaxy_config.requests == []
+
+
+def test_worker_key_is_not_sent_to_the_form_galaxy(tmp_path, galaxy_config):
+    path = _work_list(tmp_path)
+
+    with pytest.raises(ApplicationError, match="only sent to the harvest config"):
+        ActivityEnvironment().run(
+            run_galaxy,
+            RunGalaxyInput(
+                work_list_path=str(path), run_id="run-1", galaxy_url=galaxy_config.url
+            ),
+        )
     assert galaxy_config.requests == []
 
 
@@ -1028,6 +1067,36 @@ async def test_form_values_replace_the_harvest_config(
     assert galaxy_config.work_lists[0]["raw_extensions"] == [".sxm"]
     run_config = json.loads((Path(result["run_dir"]) / RUN_CONFIG_FILE).read_text())
     assert run_config["harvest_config"]["galaxy_workflow_id"] == "wf-form"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("actions_fs", "nomad_config")
+async def test_form_servers_are_used_in_every_step(
+    fake_galaxy, fake_zenodo, harvest_config_file, monkeypatch
+):
+    # The config's servers refuse connections: every step must use the form's.
+    content = json.loads(harvest_config_file.read_text())
+    dead = "http://127.0.0.1:9"
+    harvest_config_file.write_text(
+        json.dumps(content | {"zenodo_url": dead, "galaxy_url": dead})
+    )
+    monkeypatch.setenv("ZENODO_TOKEN", "worker-token")
+    _real_galaxy(fake_galaxy)
+
+    result = await _run_workflow(
+        f"zenodo-harvest-{uuid.uuid4()}",
+        dry_run=False,
+        zenodo_url=fake_zenodo.url,
+        galaxy_url=fake_galaxy.url,
+        galaxy_api_key="form-key",
+    )
+
+    assert result["galaxy"]["placeholder"] is False
+    assert result["nomad"]["status"] == "ok"  # zips fetched, projects created
+    assert fake_galaxy.api_keys == {"form-key"}
+    assert set(fake_zenodo.auth_headers) == {None}
+    run_config = json.loads((Path(result["run_dir"]) / RUN_CONFIG_FILE).read_text())
+    assert run_config["harvest_config"]["galaxy_url"] == fake_galaxy.url
 
 
 @pytest.mark.asyncio

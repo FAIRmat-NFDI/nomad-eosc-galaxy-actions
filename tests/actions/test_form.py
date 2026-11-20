@@ -16,12 +16,14 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     DEFAULT_HARVEST_CONFIG,
+    DEFAULT_LLM_MODEL,
+    HarvestConfigError,
     load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
-    DEFAULT_RAW_EXTENSIONS,
     ZENODO_QUERY_EXAMPLES,
     BuildWorkListInput,
+    ConfigOverrides,
     ZenodoHarvestWorkflowInput,
 )
 
@@ -32,18 +34,32 @@ def _form(**values) -> ZenodoHarvestWorkflowInput:
     return ZenodoHarvestWorkflowInput(user_id="u1", **values)
 
 
-def test_defaults():
+def test_defaults_leave_every_setting_to_the_config():
     form = _form()
-    assert form.raw_extensions == DEFAULT_RAW_EXTENSIONS
-    assert form.galaxy_workflow_id is None
+    assert set(form.config_overrides()) == set(ConfigOverrides.model_fields)
+    # Only the LLM model is prefilled, so the form shows the tested one.
+    expected = dict.fromkeys(ConfigOverrides.model_fields) | {
+        "llm_model": DEFAULT_LLM_MODEL
+    }
+    assert form.config_overrides() == expected
     assert form.notify_email is None
+
+
+def test_backend_settings_are_not_in_the_form():
+    properties = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
+
+    hidden = {"schema_version", "max_archive_bytes", "max_uncompressed_bytes"}
+    hidden |= {"nomad_url", "state_dir", "eln_user"}
+    assert not hidden & set(properties)
+    assert set(ConfigOverrides.model_fields) <= set(properties)
 
 
 def test_schema_shows_the_new_fields_and_short_descriptions():
     properties = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
 
-    assert properties["raw_extensions"]["type"] == "array"
-    assert properties["raw_extensions"]["items"] == {"type": "string"}
+    for name in ("raw_extensions", "context_extensions", "ignore_patterns", "licenses"):
+        array = properties[name]["anyOf"][0]
+        assert array == {"type": "array", "items": {"type": "string"}}, name
     assert {"galaxy_workflow_id", "notify_email"} <= set(properties)
     assert "run_number" not in properties
     for name, field in properties.items():
@@ -66,10 +82,64 @@ def test_raw_extensions_are_normalized(given, expected):
     assert _form(raw_extensions=given).raw_extensions == expected
 
 
-@pytest.mark.parametrize("given", [[], ["", "."]])
-def test_raw_extensions_need_one_extension(given):
-    with pytest.raises(ValidationError, match="at least one raw file extension"):
-        _form(raw_extensions=given)
+def test_context_extensions_are_normalized():
+    form = _form(context_extensions=["TXT", " .md", "txt", ""])
+    assert form.context_extensions == [".txt", ".md"]
+
+
+@pytest.mark.parametrize(
+    "name", ["raw_extensions", "context_extensions", "ignore_patterns", "licenses"]
+)
+@pytest.mark.parametrize("given", [[], ["", " "], [" . "]])
+def test_empty_lists_mean_not_set(name, given):
+    if given == [" . "] and name in ("ignore_patterns", "licenses"):
+        given = ["  "]  # "." is a valid pattern or ID, not an empty entry
+    assert getattr(_form(**{name: given}), name) is None
+
+
+def test_ignore_patterns_are_trimmed_and_keep_their_case():
+    form = _form(ignore_patterns=[" __MACOSX/* ", "*.MP4", "*.MP4"])
+    assert form.ignore_patterns == ["__MACOSX/*", "*.MP4"]
+
+
+def test_licenses_are_lowercase():
+    assert _form(licenses=[" CC-BY-4.0", "cc-by-4.0"]).licenses == ["cc-by-4.0"]
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("https://sandbox.zenodo.org/", "https://sandbox.zenodo.org"),
+        (" http://localhost:8080 ", "http://localhost:8080"),
+        ("  ", None),
+    ],
+)
+def test_urls_are_trimmed(given, expected):
+    form = _form(zenodo_url=given, galaxy_url=given, galaxy_api_key="key")
+    assert (form.zenodo_url, form.galaxy_url) == (expected, expected)
+
+
+@pytest.mark.parametrize("given", ["usegalaxy.eu", "ftp://usegalaxy.eu", "file:///x"])
+@pytest.mark.parametrize("name", ["zenodo_url", "galaxy_url"])
+def test_urls_need_http(name, given):
+    with pytest.raises(ValidationError, match="starting with https://"):
+        _form(**{name: given}, galaxy_api_key="key")
+
+
+@pytest.mark.parametrize("key", [None, ""])
+def test_own_galaxy_url_needs_own_key(key):
+    with pytest.raises(ValidationError, match="also give your galaxy_api_key"):
+        _form(galaxy_url="https://usegalaxy.org", galaxy_api_key=key)
+
+
+def test_own_galaxy_url_with_own_key():
+    form = _form(galaxy_url="https://usegalaxy.org", galaxy_api_key="key")
+    assert form.galaxy_url == "https://usegalaxy.org"
+
+
+def test_negative_delay_is_refused():
+    with pytest.raises(ValidationError):
+        _form(zenodo_request_delay=-1)
 
 
 def test_empty_text_fields_mean_not_set():
@@ -162,12 +232,16 @@ def _config():
     return load_harvest_config(DEFAULT_HARVEST_CONFIG)
 
 
-def test_form_values_replace_the_config():
-    form = _form(
-        galaxy_workflow_id="wf-form", raw_extensions=[".dat"], zenodo_query="AFM"
-    )
-    data = BuildWorkListInput(
+def _overrides(**values) -> BuildWorkListInput:
+    form = _form(**values)
+    return BuildWorkListInput(
         run_dir="r", user_id="u1", run_id="run-1", **form.config_overrides()
+    )
+
+
+def test_form_values_replace_the_config():
+    data = _overrides(
+        galaxy_workflow_id="wf-form", raw_extensions=[".dat"], zenodo_query="AFM"
     )
 
     config = apply_overrides(_config(), data)
@@ -175,6 +249,60 @@ def test_form_values_replace_the_config():
     assert (config.galaxy_workflow_id, config.raw_extensions) == ("wf-form", [".dat"])
     assert config.zenodo_query == "AFM"
     assert config.licenses == _config().licenses  # the rest is unchanged
+
+
+def test_form_lists_replace_the_config_lists():
+    data = _overrides(
+        raw_extensions=[".sm4"], context_extensions=[".pdf"], ignore_patterns=["*.mp4"]
+    )
+
+    config = apply_overrides(_config(), data)
+
+    # Replaced, not extended: the config's other items are gone.
+    assert config.raw_extensions == [".sm4"]
+    assert config.context_extensions == [".pdf"]
+    assert config.ignore_patterns == ["*.mp4"]
+
+
+def test_form_urls_replace_the_config():
+    data = _overrides(
+        zenodo_url="https://sandbox.zenodo.org",
+        galaxy_url="https://usegalaxy.org",
+        galaxy_api_key="key",
+    )
+
+    config = apply_overrides(_config(), data)
+
+    assert (config.zenodo_url, config.galaxy_url) == (
+        "https://sandbox.zenodo.org",
+        "https://usegalaxy.org",
+    )
+
+
+def test_form_can_narrow_the_licenses():
+    config = apply_overrides(_config(), _overrides(licenses=["cc-zero"]))
+    assert config.licenses == ["cc-zero"]
+
+
+def test_form_cannot_add_a_license():
+    with pytest.raises(
+        HarvestConfigError, match=r"\['cc-by-nc-4.0'\] are not accepted"
+    ):
+        apply_overrides(_config(), _overrides(licenses=["cc-zero", "cc-by-nc-4.0"]))
+
+
+@pytest.mark.parametrize(("given", "expected"), [(5.0, 5.0), (0.5, 2.0), (0, 2.0)])
+def test_form_can_only_lengthen_the_delay(given, expected):
+    assert _config().zenodo_request_delay == 2.0  # noqa: PLR2004
+    data = _overrides(zenodo_request_delay=given)
+    assert apply_overrides(_config(), data).zenodo_request_delay == expected
+
+
+def test_backend_settings_keep_the_config():
+    config = apply_overrides(_config(), _overrides(zenodo_query="AFM"))
+
+    for name in ("max_archive_bytes", "max_uncompressed_bytes", "nomad_url"):
+        assert getattr(config, name) == getattr(_config(), name)
 
 
 def test_empty_form_values_keep_the_config():

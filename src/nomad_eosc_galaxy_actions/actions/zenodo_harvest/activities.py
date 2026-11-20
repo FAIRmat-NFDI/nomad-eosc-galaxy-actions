@@ -54,6 +54,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     FetchProjectsInput,
     FetchProjectsResult,
     FinishRunInput,
+    GalaxyKeyInput,
     MergeStateInput,
     PollGalaxyInput,
     PollGalaxyResult,
@@ -139,30 +140,59 @@ def _harvest_config(overrides: ConfigOverrides | None = None) -> HarvestConfig:
     entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
     try:
         harvest_config = load_harvest_config(entry_point.harvest_config_path)
+        return apply_overrides(harvest_config, overrides)
     except (FileNotFoundError, HarvestConfigError) as error:
         # Loading again gives the same error, so do not retry.
         raise ApplicationError(str(error), non_retryable=True) from error
-    return apply_overrides(harvest_config, overrides)
 
 
 def apply_overrides(
     harvest_config: HarvestConfig, overrides: ConfigOverrides | None
 ) -> HarvestConfig:
-    """The harvest config with the form's non-empty values in place of its own."""
+    """The harvest config with the form's non-empty values in place of its own.
+
+    A form list replaces the config's list. The form can only narrow `licenses`
+    and only lengthen `zenodo_request_delay` (Zenodo's rate limit).
+
+    Raises:
+        HarvestConfigError: the form gives a license the config does not accept.
+    """
     if overrides is None:
         return harvest_config
-    update = overrides.model_dump(include=set(ConfigOverrides.model_fields))
-    return harvest_config.model_copy(
-        update={key: value for key, value in update.items() if value}
-    )
+    update = {
+        key: value
+        for key, value in overrides.model_dump(
+            include=set(ConfigOverrides.model_fields)
+        ).items()
+        if value not in (None, "", [])
+    }
+    if extra := set(update.get("licenses", [])) - set(harvest_config.licenses):
+        raise HarvestConfigError(
+            f"licenses {sorted(extra)} are not accepted by the harvest config "
+            f"(accepted: {', '.join(harvest_config.licenses)})"
+        )
+    if "zenodo_request_delay" in update:
+        update["zenodo_request_delay"] = max(
+            update["zenodo_request_delay"], harvest_config.zenodo_request_delay
+        )
+    return harvest_config.model_copy(update=update)
 
 
-def _secret(service: str, form_value, *, required: bool = True) -> str | None:
+def _secret(
+    service: str, form_value, *, required: bool = True, worker: bool = True
+) -> str | None:
     """A secret from the form or the worker; a missing one is not retried."""
     try:
-        return credentials.resolve_secret(service, form_value, required=required)
+        return credentials.resolve_secret(
+            service, form_value, required=required, worker=worker
+        )
     except credentials.MissingSecretError as error:
         raise ApplicationError(str(error), non_retryable=True) from error
+
+
+def _galaxy_key(data: GalaxyKeyInput) -> str:
+    """The form's Galaxy API key, else the worker's (only for the config's Galaxy)."""
+    return _secret("galaxy", data.galaxy_api_key, worker=not data.galaxy_url)
 
 
 def _state_dir(harvest_config: HarvestConfig) -> Path:
@@ -344,7 +374,9 @@ def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
     allows larger pages.
     """
     harvest_config = _harvest_config(data)
-    token = _secret("zenodo", data.zenodo_token, required=False)
+    token = _secret(
+        "zenodo", data.zenodo_token, required=False, worker=not data.zenodo_url
+    )
     session = zenodo_client.make_session(token)
     missing: list[zenodo_client.Rejection] = []
     if data.record_ids:
@@ -532,7 +564,7 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     never written to the run's files, logs or Galaxy parameters.
     """
     harvest_config = _harvest_config(data)
-    api_key = _secret("galaxy", data.galaxy_api_key)
+    api_key = _galaxy_key(data)
     model = _llm_model(data, harvest_config)
     inputs: dict[str, Any] = {GALAXY_USE_LLM_STEP: data.use_llm}
     if model:
@@ -567,9 +599,9 @@ def _llm_model(data: RunGalaxyInput, harvest_config: HarvestConfig) -> str | Non
 def poll_galaxy(data: PollGalaxyInput) -> PollGalaxyResult:
     """Check the invocation's status once; the workflow sleeps between calls."""
     result = galaxy_client.poll_invocation(
-        api_key=_secret("galaxy", data.galaxy_api_key),
+        api_key=_galaxy_key(data),
         invocation_id=data.invocation_id,
-        galaxy_url=_harvest_config().galaxy_url,
+        galaxy_url=_harvest_config(data).galaxy_url,
     )
     return PollGalaxyResult(**result)
 
@@ -581,8 +613,8 @@ def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
     The manifest must carry this run's `run_id`, which proves it belongs to
     the work list that was sent.
     """
-    harvest_config = _harvest_config()
-    api_key = _secret("galaxy", data.galaxy_api_key)
+    harvest_config = _harvest_config(data)
+    api_key = _galaxy_key(data)
     run_dir = Path(data.run_dir)
 
     def download(dataset_id: str, name: str) -> Path:
@@ -656,8 +688,8 @@ def _write_duplicates(
 @activity.defn
 def fetch_projects(data: FetchProjectsInput) -> FetchProjectsResult:
     """Download Galaxy's project zips to `run_dir/projects/<record ID>.zip`."""
-    harvest_config = _harvest_config()
-    api_key = _secret("galaxy", data.galaxy_api_key)
+    harvest_config = _harvest_config(data)
+    api_key = _galaxy_key(data)
     elements = galaxy_client.collection_elements(
         api_key, data.collection_id, galaxy_url=harvest_config.galaxy_url
     )
@@ -720,7 +752,7 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
     Once the demo project limit is reached, the remaining records are left
     out (reason `project_limit`) and handled by a later run.
     """
-    harvest_config = _harvest_config()
+    harvest_config = _harvest_config(data)
     projects = _projects(harvest_config, data.user_id)
     content = json.loads(Path(data.work_list_path).read_text(encoding="utf-8"))
     records = {record["record_id"]: record for record in content["records"]}

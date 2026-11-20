@@ -9,7 +9,14 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
@@ -17,8 +24,6 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 )
 from nomad_eosc_galaxy_actions.credentials import reveal
 
-# Raw file extensions that pynxtools-spm can read (pynxtools_spm/reader.py).
-DEFAULT_RAW_EXTENSIONS = [".sxm", ".dat", ".sm4", ".spm", ".flt"]
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 RECORD_ID_PATTERN = r"^\d+$"
 # Shown as suggestions under the form's query field (JSON schema `examples`).
@@ -42,24 +47,59 @@ LLM_MODEL_EXAMPLES = [
 
 
 def _normalize_extensions(values: list[str] | None) -> list[str] | None:
-    """`SXM`, `.sxm ` → `.sxm`; empty entries and repeats are dropped."""
+    """`SXM`, `.sxm ` → `.sxm`; empty entries and repeats are dropped.
+
+    An empty result is None: the form leaves the list to the harvest config.
+    """
     if values is None:
         return None
     normalized = [f".{v.strip().lstrip('.').lower()}" for v in values if v.strip(" .")]
-    return list(dict.fromkeys(normalized))
+    return list(dict.fromkeys(normalized)) or None
+
+
+def _normalize_items(
+    values: list[str] | None, *, lower: bool = False
+) -> list[str] | None:
+    """Spaces, empty entries and repeats are dropped; empty is None (see above)."""
+    if values is None:
+        return None
+    items = (v.strip().lower() if lower else v.strip() for v in values)
+    return list(dict.fromkeys(item for item in items if item)) or None
 
 
 class ConfigOverrides(BaseModel):
-    """Form values that replace the harvest config's ones for one run."""
+    """Form values that replace the harvest config's ones for one run.
 
-    galaxy_workflow_id: str | None = Field(
-        None, description="Replaces the config's galaxy_workflow_id."
+    `schema_version`, the size limits, `nomad_url`, `state_dir` and `eln_user`
+    stay in the harvest config only.
+    """
+
+    zenodo_url: str | None = Field(
+        None, description="Replaces the config's zenodo_url."
+    )
+    zenodo_query: str | None = Field(
+        None, description="Replaces the config's zenodo_query."
+    )
+    zenodo_request_delay: float | None = Field(
+        None, description="Replaces the config's delay, if longer."
     )
     raw_extensions: list[str] | None = Field(
         None, description="Replaces the config's raw_extensions."
     )
-    zenodo_query: str | None = Field(
-        None, description="Replaces the config's zenodo_query."
+    context_extensions: list[str] | None = Field(
+        None, description="Replaces the config's context_extensions."
+    )
+    ignore_patterns: list[str] | None = Field(
+        None, description="Replaces the config's ignore_patterns."
+    )
+    licenses: list[str] | None = Field(
+        None, description="Replaces the config's licenses; must be a subset of them."
+    )
+    galaxy_url: str | None = Field(
+        None, description="Replaces the config's galaxy_url."
+    )
+    galaxy_workflow_id: str | None = Field(
+        None, description="Replaces the config's galaxy_workflow_id."
     )
     llm_model: str | None = Field(None, description="Replaces the config's llm_model.")
 
@@ -79,10 +119,26 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         description="Convert, but create no NOMAD projects and keep the state "
         "unchanged. Example: on for a first test.",
     )
+    galaxy_url: str | None = Field(
+        None,
+        description="Galaxy server; empty uses the harvest config. Needs your own "
+        "Galaxy API key. Example: https://usegalaxy.eu",
+    )
     galaxy_workflow_id: str | None = Field(
         None,
         description="ID of the harvest workflow in your Galaxy account; empty uses "
         "the harvest config. Example: a82009b719022643",
+    )
+    zenodo_url: str | None = Field(
+        None,
+        description="Zenodo server; empty uses the harvest config. Gets no worker "
+        "token. Example: https://sandbox.zenodo.org",
+    )
+    zenodo_request_delay: float | None = Field(
+        None,
+        ge=0,
+        description="Seconds between Zenodo requests; empty or shorter uses the "
+        "harvest config's. Example: 5",
     )
     zenodo_query: str | None = Field(
         None,
@@ -95,9 +151,26 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         description="Only these Zenodo records (record or concept IDs), in place "
         "of the query. Example: 15147607",
     )
-    raw_extensions: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_RAW_EXTENSIONS),
-        description="Raw file extensions converted to NeXus. Example: .sxm",
+    # The lists replace the config's lists; to extend one, give its old items too.
+    raw_extensions: list[str] | None = Field(
+        None,
+        description="Raw file extensions converted to NeXus; replaces the harvest "
+        "config's list, empty uses it. Example: .sxm",
+    )
+    context_extensions: list[str] | None = Field(
+        None,
+        description="Extensions of files that describe the experiment; replaces the "
+        "harvest config's list. Example: .txt",
+    )
+    ignore_patterns: list[str] | None = Field(
+        None,
+        description="Glob patterns of files to skip; replaces the harvest config's "
+        "list. Example: __MACOSX/*",
+    )
+    licenses: list[str] | None = Field(
+        None,
+        description="Zenodo license IDs to accept, out of the harvest config's; "
+        "empty accepts all of them. Example: cc-by-4.0",
     )
     max_records: int | None = Field(
         None,
@@ -159,13 +232,38 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     # out of the JSON schema, so the form does not show it.
     run_number: SkipJsonSchema[int] = 1
 
-    @field_validator("raw_extensions")
+    @field_validator("raw_extensions", "context_extensions")
     @classmethod
-    def _check_extensions(cls, value: list[str]) -> list[str]:
-        value = _normalize_extensions(value)
-        if not value:
-            raise ValueError("give at least one raw file extension")
-        return value
+    def _check_extensions(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_extensions(value)
+
+    @field_validator("ignore_patterns")
+    @classmethod
+    def _check_patterns(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_items(value)
+
+    @field_validator("licenses")
+    @classmethod
+    def _check_licenses(cls, value: list[str] | None) -> list[str] | None:
+        """Zenodo license IDs are lowercase, e.g. cc-by-4.0."""
+        return _normalize_items(value, lower=True)
+
+    @field_validator("galaxy_url", "zenodo_url")
+    @classmethod
+    def _check_url(cls, value: str | None) -> str | None:
+        """`https://usegalaxy.eu/` → `https://usegalaxy.eu`; http(s) only."""
+        if value is None:
+            return None
+        if not value.startswith(("https://", "http://")):
+            raise ValueError(f"give a URL starting with https://, got {value!r}")
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _own_galaxy_key_for_own_galaxy(self) -> "ZenodoHarvestWorkflowInput":
+        """The worker's GALAXY_API_KEY is only sent to the harvest config's Galaxy."""
+        if self.galaxy_url and not reveal(self.galaxy_api_key):
+            raise ValueError("galaxy_url is set: also give your galaxy_api_key")
+        return self
 
     @field_validator("zenodo_record_ids")
     @classmethod
@@ -177,7 +275,13 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         return ids
 
     @field_validator(
-        "galaxy_workflow_id", "zenodo_query", "llm_model", "notify_email", mode="before"
+        "galaxy_url",
+        "galaxy_workflow_id",
+        "zenodo_url",
+        "zenodo_query",
+        "llm_model",
+        "notify_email",
+        mode="before",
     )
     @classmethod
     def _empty_is_none(cls, value: str | None) -> str | None:
@@ -205,16 +309,14 @@ class ZenodoHarvestWorkflowInput(BaseModel):
 
     def config_overrides(self) -> dict[str, Any]:
         """Keyword arguments for the activity inputs based on ConfigOverrides."""
-        return {
-            "galaxy_workflow_id": self.galaxy_workflow_id,
-            "raw_extensions": self.raw_extensions,
-            "zenodo_query": self.zenodo_query,
-            "llm_model": self.llm_model,
-        }
+        return {name: getattr(self, name) for name in ConfigOverrides.model_fields}
 
 
-class GalaxyKeyInput(BaseModel):
-    """Base of activity inputs that call Galaxy with the user's API key."""
+class GalaxyKeyInput(ConfigOverrides):
+    """Base of activity inputs that call Galaxy with the user's API key.
+
+    The form's values come along, so every call goes to the form's galaxy_url.
+    """
 
     galaxy_api_key: SecretStr | None = Field(
         None, description="From the form; empty uses the worker's GALAXY_API_KEY."
@@ -319,7 +421,7 @@ class PrepareBatchResult(BaseModel):
     work_list_path: str
 
 
-class RunGalaxyInput(GalaxyKeyInput, ConfigOverrides):
+class RunGalaxyInput(GalaxyKeyInput):
     """Input for the activity that sends the work list to Galaxy."""
 
     work_list_path: str
@@ -384,8 +486,11 @@ class FetchProjectsResult(BaseModel):
     zip_paths: dict[str, str] = Field(..., description="Record ID → local zip.")
 
 
-class CreateProjectsInput(BaseModel):
-    """Input for the activity that creates one NOMAD project per zip."""
+class CreateProjectsInput(ConfigOverrides):
+    """Input for the activity that creates one NOMAD project per zip.
+
+    The form's zenodo_url is needed for the projects' references.
+    """
 
     work_list_path: str
     manifest_path: str = Field(..., description="For the checksums of each project.")
