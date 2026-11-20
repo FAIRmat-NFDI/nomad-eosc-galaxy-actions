@@ -37,6 +37,9 @@ dev = [
     "mypy",
     "ruff>=0.15.0",
     "pytest",
+    "pytest-asyncio",
+    # The Action tests need NOMAD's Action runtime (Temporal, FastAPI, ...).
+    "nomad-lab[infrastructure]>=1.4.3",
     "pre-commit",
     "cruft",
     "mkdocs",
