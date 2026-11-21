@@ -54,3 +54,10 @@ Put the printed `workflow_id` into `nomad.yaml`'s `galaxy_workflow_id` option ab
 ## Temporal
 
 This plugin needs the CPU action queue running. For local development, run `docker compose up -d` (brings up Temporal) and `uv run poe cpuworker` (the worker process), from the `nomad-distro-dev` repo root.
+
+A user's own Galaxy key or Zenodo token from the Action form travels in Temporal's workflow and activity inputs. NOMAD encrypts these inputs, except in development mode. If you run development mode, for example on a shared test server, set a key in `nomad.yaml` so the inputs are encrypted there too:
+
+```yaml
+temporal:
+  payload_codec_key: "<your-secret-key>"
+```

@@ -65,6 +65,7 @@ def reveal(value: SecretStr | None) -> str | None:
     """The plain value, for `field_serializer(..., when_used="json")`.
 
     Temporal sends inputs as JSON; without this the activity would get the
-    masked "**********" instead of the secret.
+    masked "**********" instead of the secret. NOMAD encrypts these inputs,
+    except in development mode without `temporal.payload_codec_key`.
     """
     return value.get_secret_value() if value is not None else None
