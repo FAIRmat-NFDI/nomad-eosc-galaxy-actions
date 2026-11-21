@@ -121,29 +121,29 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     galaxy_url: str | None = Field(
         None,
-        description="Galaxy server; empty uses the harvest config. Needs your own "
-        "Galaxy API key. Example: https://usegalaxy.eu",
+        description="Galaxy server. If empty, the harvest config's server is used. "
+        "Needs your own API key. Example: https://usegalaxy.eu",
     )
     galaxy_workflow_id: str | None = Field(
         None,
-        description="ID of the harvest workflow in your Galaxy account; empty uses "
-        "the harvest config. Example: a82009b719022643",
+        description="ID of the harvest workflow in Galaxy. If empty, the harvest "
+        "config's ID is used. Example: a82009b719022643",
     )
     zenodo_url: str | None = Field(
         None,
-        description="Zenodo server; empty uses the harvest config. Gets no worker "
-        "token. Example: https://sandbox.zenodo.org",
+        description="Zenodo server. If empty, the harvest config's server is used. "
+        "Gets no worker token. Example: https://sandbox.zenodo.org",
     )
     zenodo_request_delay: float | None = Field(
         None,
         ge=0,
-        description="Seconds between Zenodo requests; empty or shorter uses the "
-        "harvest config's. Example: 5",
+        description="Seconds between Zenodo requests. If empty or shorter, the "
+        "harvest config's delay is used. Example: 5",
     )
     zenodo_query: str | None = Field(
         None,
-        description="Zenodo search query; empty uses the harvest config. Click "
-        "for more examples. Example: STM AND resource_type.type:dataset",
+        description="Zenodo search query. If empty, the config's is used. Click for "
+        "examples. Example: STM AND resource_type.type:dataset",
         examples=ZENODO_QUERY_EXAMPLES,
     )
     zenodo_record_ids: list[str] = Field(
@@ -154,8 +154,8 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     # The lists replace the config's lists; to extend one, give its old items too.
     raw_extensions: list[str] | None = Field(
         None,
-        description="Raw file extensions converted to NeXus; replaces the harvest "
-        "config's list, empty uses it. Example: .sxm",
+        description="Raw file extensions converted to NeXus. Replaces the config's "
+        "list; if empty, the config's is used. Example: .sxm",
     )
     context_extensions: list[str] | None = Field(
         None,
@@ -169,26 +169,26 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     licenses: list[str] | None = Field(
         None,
-        description="Zenodo license IDs to accept, out of the harvest config's; "
-        "empty accepts all of them. Example: cc-by-4.0",
+        description="Zenodo license IDs to accept, out of the harvest config's. "
+        "If empty, all of them are accepted. Example: cc-by-4.0",
     )
     max_records: int | None = Field(
         None,
         ge=1,
-        description="At most this many Zenodo records with new work; empty: no "
-        "limit. Example: 6 with records_per_work_list 2 → 3 Galaxy runs",
+        description="At most this many Zenodo records with new work. If empty, no "
+        "limit. Example: 6, with records_per_work_list 2 → 3 runs",
     )
     records_per_work_list: int | None = Field(
         1,
         ge=1,
-        description="Zenodo records per Galaxy run; empty sends all in one run. "
+        description="Zenodo records per Galaxy run. If empty, all go into one run. "
         "Example: 2 with max_records 6 → 3 Galaxy runs of 2 records",
     )
     repeat_every_days: int | None = Field(
         None,
         ge=1,
-        description="Repeat the run every N days until stopped; empty runs once. "
-        "Example: 7",
+        description="Repeat the run every N days until stopped. If empty, it runs "
+        "once. Example: 7",
     )
     max_runs: int | None = Field(
         None,
@@ -208,8 +208,8 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     llm_model: str | None = Field(
         DEFAULT_LLM_MODEL,
-        description="LLM Hub multimodal model; empty: the config's; unknown: LLM Hub "
-        "picks one. Example: gemma-4-31b-llmlb-freiburg",
+        description="LLM Hub multimodal model. If empty, the config's is used. "
+        "Example: gemma-4-31b-llmlb-freiburg",
         examples=LLM_MODEL_EXAMPLES,
     )
     notify_email: str | None = Field(
@@ -220,13 +220,13 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     galaxy_api_key: SecretStr | None = Field(
         None,
-        description="Your Galaxy API key (User > Preferences > Manage API Key); "
-        "empty uses the worker's GALAXY_API_KEY.",
+        description="Your Galaxy API key (User > Preferences > Manage API Key). "
+        "If empty, the worker's GALAXY_API_KEY is used.",
     )
     zenodo_token: SecretStr | None = Field(
         None,
-        description="Optional Zenodo token for larger search pages; empty uses "
-        "the worker's ZENODO_TOKEN.",
+        description="Optional Zenodo token for larger search pages. If empty, "
+        "the worker's ZENODO_TOKEN is used.",
     )
     # Set by the workflow when it continues as new; SkipJsonSchema keeps it
     # out of the JSON schema, so the form does not show it.
