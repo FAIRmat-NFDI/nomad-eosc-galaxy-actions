@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 import requests
 
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
-from nomad_eosc_galaxy_actions.nomad_projects import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_projects import (
     HARVEST_METADATA_FILE,
     HARVEST_METADATA_SCHEMA_VERSION,
     MAX_DEMO_PROJECTS,

@@ -26,8 +26,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from nomad_eosc_galaxy_actions.state_store import StateStore
-from nomad_eosc_galaxy_actions.zenodo_client import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.zenodo_client import (
     ARCHIVE_EXTENSIONS,
     ZenodoFile,
     ZenodoRecord,

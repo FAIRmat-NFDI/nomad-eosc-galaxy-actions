@@ -22,10 +22,10 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import Worker
 
-from nomad_eosc_galaxy_actions import zenodo_client
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest import (
     activities as activities_module,
 )
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest import zenodo_client
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     CANDIDATES_FILE,
     CANDIDATES_SCHEMA_VERSION,
@@ -83,13 +83,22 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     WriteReportResult,
     ZenodoHarvestWorkflowInput,
 )
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_projects import (
+    MAX_DEMO_PROJECTS,
+)
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.report import (
+    REPORT_SCHEMA_VERSION,
+)
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import (
+    ACTIVE_RUN_FILE,
+    StateStore,
+)
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.work_list import (
+    WORK_LIST_SCHEMA_VERSION,
+)
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
     ZenodoHarvestWorkflow,
 )
-from nomad_eosc_galaxy_actions.nomad_projects import MAX_DEMO_PROJECTS
-from nomad_eosc_galaxy_actions.report import REPORT_SCHEMA_VERSION
-from nomad_eosc_galaxy_actions.state_store import ACTIVE_RUN_FILE, StateStore
-from nomad_eosc_galaxy_actions.work_list import WORK_LIST_SCHEMA_VERSION
 
 
 def _state(actions_fs: Path, user_id: str = "u1") -> Path:
@@ -476,7 +485,7 @@ def test_build_work_list_activity(tmp_path, actions_fs, harvest_config_file):
 def test_build_work_list_activity_skips_resolved_records(
     tmp_path, actions_fs, harvest_config_file
 ):
-    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
 
     with (
         StateStore(_state(actions_fs)) as store,
@@ -977,7 +986,7 @@ def test_create_projects_rejects_unknown_record(tmp_path, nomad_config):
 
 
 def test_merge_state_activity(tmp_path, actions_fs, harvest_config_file, fake_nomad):
-    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
 
     manifest, results = _galaxy_outputs("run-1")
     (tmp_path / MANIFEST_FILE).write_bytes(manifest)
@@ -1186,7 +1195,7 @@ def _real_galaxy(galaxy, raw_files: dict | None = None) -> None:
 async def test_workflow_creates_projects_and_merges(
     actions_fs, nomad_config, fake_galaxy
 ):
-    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
     _real_galaxy(fake_galaxy)
@@ -1237,7 +1246,7 @@ async def test_workflow_creates_projects_and_merges(
 async def test_every_written_file_has_its_schema_version(
     actions_fs, nomad_config, fake_galaxy
 ):
-    from nomad_eosc_galaxy_actions import state_store  # noqa: PLC0415
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest import state_store  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
     _real_galaxy(fake_galaxy)
@@ -1477,7 +1486,7 @@ async def test_batches_after_the_project_limit_are_skipped(
 
 @pytest.mark.asyncio
 async def test_workflow_dry_run_changes_nothing(actions_fs, nomad_config, fake_galaxy):
-    from nomad_eosc_galaxy_actions.state_store import StateStore  # noqa: PLC0415
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
 
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
     _real_galaxy(fake_galaxy)

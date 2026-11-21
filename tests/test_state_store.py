@@ -9,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from nomad_eosc_galaxy_actions.nomad_entries import FoundFile
-from nomad_eosc_galaxy_actions.state_store import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_entries import FoundFile
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import (
     ACTIVE_RUN_FILE,
     STATE_SCHEMA_VERSION,
     UPGRADES,

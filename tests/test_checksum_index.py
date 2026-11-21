@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from nomad_eosc_galaxy_actions.checksum_index import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.checksum_index import (
     CHECKSUM_INDEX_SCHEMA_VERSION,
     ChecksumIndex,
     ChecksumIndexError,
@@ -15,7 +15,7 @@ from nomad_eosc_galaxy_actions.checksum_index import (
     converted_files,
     find_duplicates,
 )
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
 
 
 def _entry(sha256="sha-a", user_id="u1", upload_id="up-1") -> IndexEntry:

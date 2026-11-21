@@ -5,8 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
-from nomad_eosc_galaxy_actions.nomad_entries import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_entries import (
     LOOKUP_CHUNK,
     LOOKUP_FIELDS,
     LOOKUP_PAGE_SIZE,

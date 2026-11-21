@@ -3,8 +3,8 @@
 # This file is part of nomad-eosc-galaxy-actions.
 #
 # SPDX-License-Identifier: Apache-2.0
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
-from nomad_eosc_galaxy_actions.report import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.report import (
     REPORT_SCHEMA_VERSION,
     build_report,
     email_subject,

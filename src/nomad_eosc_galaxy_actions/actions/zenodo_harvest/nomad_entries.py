@@ -28,7 +28,7 @@ from urllib.parse import quote
 import requests
 from pydantic import BaseModel
 
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
 
 EXTERNAL_ID = re.compile(r"zenodo:(?P<cid>\d+):sha256:(?P<sha256>[0-9a-f]{64})")
 MD5_FRAGMENT = re.compile(r"#md5=(?P<md5>[0-9a-f]{32})$")

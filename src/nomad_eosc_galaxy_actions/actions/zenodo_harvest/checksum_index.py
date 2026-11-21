@@ -22,8 +22,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
-from nomad_eosc_galaxy_actions.state_store import locked, write_atomically
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import (
+    locked,
+    write_atomically,
+)
 
 # Version of the file layout (same rule as STATE_SCHEMA_VERSION).
 CHECKSUM_INDEX_SCHEMA_VERSION = 1

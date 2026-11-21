@@ -20,12 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from nomad_eosc_galaxy_actions.nomad_entries import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_entries import (
     LOOKUP_FIELDS,
     LOOKUP_PAGE_SIZE,
     chunks,
 )
-from nomad_eosc_galaxy_actions.nomad_projects import wait_until_idle, write_temp_file
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_projects import (
+    wait_until_idle,
+    write_temp_file,
+)
 
 
 class LocalProjects:

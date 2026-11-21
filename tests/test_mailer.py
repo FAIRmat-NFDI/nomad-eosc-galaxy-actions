@@ -9,7 +9,7 @@ import socket
 import pytest
 from nomad.config.models.config import Mail
 
-from nomad_eosc_galaxy_actions.mailer import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.mailer import (
     MailConfigError,
     SmtpSettings,
     build_message,

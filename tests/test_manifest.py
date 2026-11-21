@@ -9,15 +9,21 @@ decides, checked through the next run's work list where possible."""
 import pytest
 from pydantic import ValidationError
 
-from nomad_eosc_galaxy_actions.manifest import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import (
     Manifest,
     MergeSummary,
     Results,
     merge_manifest,
 )
-from nomad_eosc_galaxy_actions.state_store import StateStore
-from nomad_eosc_galaxy_actions.work_list import WorkListSettings, plan_record
-from nomad_eosc_galaxy_actions.zenodo_client import ZenodoFile, ZenodoRecord
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.work_list import (
+    WorkListSettings,
+    plan_record,
+)
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.zenodo_client import (
+    ZenodoFile,
+    ZenodoRecord,
+)
 
 CID = "100"
 RUN = "run-1"

@@ -21,10 +21,9 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from nomad_eosc_galaxy_actions import (
+from nomad_eosc_galaxy_actions import credentials, galaxy_client
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest import (
     checksum_index,
-    credentials,
-    galaxy_client,
     mailer,
     nomad_entries,
     nomad_projects,
@@ -40,6 +39,12 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.local_projects import (
     LocalLookup,
     LocalProjects,
+)
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import (
+    Manifest,
+    MergeSummary,
+    Results,
+    merge_manifest,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
@@ -69,13 +74,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     WriteReportInput,
     WriteReportResult,
 )
-from nomad_eosc_galaxy_actions.manifest import (
-    Manifest,
-    MergeSummary,
-    Results,
-    merge_manifest,
-)
-from nomad_eosc_galaxy_actions.state_store import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import (
     RunLockedError,
     StateStore,
     acquire_run,

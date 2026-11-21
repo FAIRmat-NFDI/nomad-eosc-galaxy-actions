@@ -8,7 +8,7 @@ import copy
 import pytest
 import requests
 
-from nomad_eosc_galaxy_actions import zenodo_client
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest import zenodo_client
 
 RAW = (".sxm",)
 LICENSES = ("cc-zero", "cc-by-4.0")

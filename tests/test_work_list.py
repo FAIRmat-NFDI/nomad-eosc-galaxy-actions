@@ -5,15 +5,15 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from nomad_eosc_galaxy_actions.state_store import StateStore
-from nomad_eosc_galaxy_actions.work_list import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.work_list import (
     WORK_LIST_SCHEMA_VERSION,
     WorkListSettings,
     batch_work_list,
     build_work_list,
     plan_record,
 )
-from nomad_eosc_galaxy_actions.zenodo_client import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.zenodo_client import (
     ZenodoFile,
     ZenodoRecord,
     parse_record,

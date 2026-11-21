@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 import requests
 
-from nomad_eosc_galaxy_actions.manifest import Manifest, Results
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, Results
 
 PROJECT_PREFIX = "zenodo_"
 HARVEST_PROJECT = re.compile(rf"{PROJECT_PREFIX}\d+")

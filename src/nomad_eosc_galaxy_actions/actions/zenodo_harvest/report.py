@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from nomad_eosc_galaxy_actions.manifest import (
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import (
     FileResult,
     Manifest,
     Results,

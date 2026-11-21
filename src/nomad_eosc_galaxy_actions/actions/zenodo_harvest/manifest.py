@@ -27,7 +27,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from nomad_eosc_galaxy_actions.state_store import StateStore
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore
 
 # Archive failures that downloading again cannot fix (`download_failed` and
 # `md5_mismatch` can be temporary, so those archives are tried again).
