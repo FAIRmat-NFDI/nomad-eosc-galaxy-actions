@@ -751,8 +751,11 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
     Once the demo project limit is reached, the remaining records are left
     out (reason `project_limit`) and handled by a later run.
     """
+    from nomad.config import config  # noqa: PLC0415
+
     harvest_config = _harvest_config(data)
     projects = _projects(harvest_config, data.user_id)
+    limit = nomad_projects.project_limit(config.services.upload_limit)
     content = json.loads(Path(data.work_list_path).read_text(encoding="utf-8"))
     records = {record["record_id"]: record for record in content["records"]}
     manifest = Manifest.model_validate_json(
@@ -783,7 +786,7 @@ def create_projects(data: CreateProjectsInput) -> CreateProjectsResult:
         name = nomad_projects.project_name(record["concept_record_id"])
         try:
             upload_id, created = nomad_projects.create_project(
-                projects, name, Path(zip_path), [reference], entries
+                projects, name, Path(zip_path), [reference], entries, limit=limit
             )
         except nomad_projects.ProjectLimitReached as error:
             activity.logger.warning("%s", error)

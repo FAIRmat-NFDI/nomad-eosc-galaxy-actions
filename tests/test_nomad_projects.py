@@ -24,6 +24,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.nomad_projects import (
     create_project,
     merge_entries,
     merge_references,
+    project_limit,
     project_name,
     version_folder,
     wait_until_idle,
@@ -300,6 +301,22 @@ def test_limit_counts_only_harvest_projects(zip_path):
     with pytest.raises(ProjectLimitReached, match=f"limit {MAX_DEMO_PROJECTS}"):
         create_project(projects, project_name("200"), zip_path, [REFERENCE])
     assert projects.created == [NAME]
+
+
+@pytest.mark.parametrize(
+    ("upload_limit", "expected"),
+    [(10, MAX_DEMO_PROJECTS), (100, MAX_DEMO_PROJECTS), (5, 4), (1, 0), (0, 0)],
+)
+def test_project_limit(upload_limit, expected):
+    assert project_limit(upload_limit) == expected
+
+
+def test_lower_limit_is_used(zip_path):
+    projects = InMemoryProjects([project_name("1"), project_name("2")])
+
+    with pytest.raises(ProjectLimitReached, match="limit 2"):
+        create_project(projects, NAME, zip_path, [REFERENCE], limit=2)
+    assert projects.created == []
 
 
 def test_adding_works_at_the_limit(zip_path):

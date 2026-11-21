@@ -10,7 +10,7 @@ from the zip Galaxy builds for that version. Rules for working against NOMAD
 (project plan, section 6):
 
 - every project is named `zenodo_<concept record ID>`;
-- at most `MAX_DEMO_PROJECTS` unpublished harvest projects exist at any
+- at most `project_limit(...)` unpublished harvest projects exist at any
   time, counted on the server, not locally;
 - an existing unpublished project with the same name gets the new version,
   so a retry never creates a second one;
@@ -39,9 +39,8 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import Manifest, 
 
 PROJECT_PREFIX = "zenodo_"
 HARVEST_PROJECT = re.compile(rf"{PROJECT_PREFIX}\d+")
-# A constant on purpose: raising it needs a reviewed code change. NOMAD allows
-# 10 unpublished projects per user (services.upload_limit); one stays free
-# for the state project.
+# A constant on purpose: raising it needs a reviewed code change. A smaller
+# NOMAD `services.upload_limit` lowers it, see `project_limit`.
 MAX_DEMO_PROJECTS = 9
 # Seconds to wait for a project's processing before files are added to it.
 PROCESSING_TIMEOUT = 600.0
@@ -55,7 +54,16 @@ HARVEST_METADATA_SCHEMA_VERSION = 1
 
 
 class ProjectLimitReached(RuntimeError):
-    """`MAX_DEMO_PROJECTS` unpublished demo projects already exist."""
+    """The limit of unpublished demo projects is reached."""
+
+
+def project_limit(upload_limit: int) -> int:
+    """Harvest projects allowed for NOMAD's unpublished `upload_limit` per user.
+
+    One project stays free for the state project; never more than
+    `MAX_DEMO_PROJECTS`.
+    """
+    return max(0, min(MAX_DEMO_PROJECTS, upload_limit - 1))
 
 
 class Projects(Protocol):
@@ -197,12 +205,14 @@ def add_harvest_metadata(
     _add_file(zip_path, f"{folder}/{HARVEST_METADATA_FILE}", content)
 
 
-def create_project(
+def create_project(  # noqa: PLR0913
     projects: Projects,
     name: str,
     zip_path: Path,
     references: list[str],
     entries: dict[str, dict[str, Any]] | None = None,
+    *,
+    limit: int = MAX_DEMO_PROJECTS,
 ) -> tuple[str, bool]:
     """Create the project, or add the zip to an unpublished one with the same name.
 
@@ -225,10 +235,10 @@ def create_project(
         projects.add(upload_id, zip_path)
         return upload_id, False
     demo = [n for n in existing if HARVEST_PROJECT.fullmatch(n)]
-    if len(demo) >= MAX_DEMO_PROJECTS:
+    if len(demo) >= limit:
         raise ProjectLimitReached(
             f"{len(demo)} unpublished {PROJECT_PREFIX}* projects exist "
-            f"(limit {MAX_DEMO_PROJECTS}); publish or delete some first"
+            f"(limit {limit}); publish or delete some first"
         )
     add_project_metadata(zip_path, references, entries)
     return projects.create(name, zip_path), True

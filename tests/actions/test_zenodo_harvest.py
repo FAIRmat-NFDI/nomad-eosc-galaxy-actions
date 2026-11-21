@@ -967,6 +967,25 @@ def test_create_projects_leaves_out_records_over_the_limit(tmp_path, nomad_confi
     assert _writes(nomad_config) == []
 
 
+def test_create_projects_follows_a_lower_upload_limit(
+    tmp_path, nomad_config, monkeypatch
+):
+    from nomad.config import config  # noqa: PLC0415
+
+    monkeypatch.setattr(config.services, "upload_limit", 3)  # 2 harvest projects
+    nomad_config.projects = {
+        f"u{i}": {"upload_name": f"zenodo_{i}", "published": False} for i in range(2)
+    }
+
+    result = ActivityEnvironment().run(
+        create_projects, _project_inputs(tmp_path, "101")
+    )
+
+    assert result.created == []
+    assert result.left_out == {"101": "project_limit"}
+    assert _writes(nomad_config) == []
+
+
 def test_create_projects_needs_pat(tmp_path, nomad_config, monkeypatch):
     monkeypatch.delenv("NOMAD_PAT")
 
