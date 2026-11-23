@@ -109,7 +109,7 @@ A run sends its records to Galaxy in batches of `records_per_work_list` records,
 
 - With 1 record per batch, a failing dataset does not hold up the others.
 - A failed batch does not stop the next ones; the run is marked failed at the end (see [Failed runs](#failed-runs)).
-- The Action keeps at most 9 unpublished harvest projects per user. NOMAD also limits unpublished projects per user (`services.upload_limit` in `nomad.yaml`, 10 by default), and one of them must stay free for the state project. So on an Oasis with a lower limit, the Action keeps one project below it. Once the limit is reached, the remaining batches are skipped and handled by a later run.
+- NOMAD limits the number of unpublished projects per user through `services.upload_limit` (typically set in `nomad.yaml`). The default limit is 10 (also used on the central NOMAD installation), but this can be configured differently for individual NOMAD Oasis installations. The Action adapts to the configured limit, keeping at most `upload_limit - 1` unpublished harvest projects per user. With the default configuration, this means 9 harvest projects. Once the limit is reached, remaining batches are skipped and handled in a later run.
 
 ### Repeated runs
 
