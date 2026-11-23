@@ -8,7 +8,6 @@ exclude = [
 # Binary/data files that can't practically carry an inline header.
 [[annotations]]
 path = [
-  "development_files/**/*.ga",
   "docs/assets/*.png",
   "examples/galaxy_demo/example_data/*.nxs",
   "src/nomad_eosc_galaxy_actions/actions/find_peaks/data/*.ga",
