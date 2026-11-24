@@ -1614,7 +1614,9 @@ async def test_failed_run_ends_the_repeated_runs(actions_fs, galaxy_config):
     galaxy_config.job_states = ["error"]
 
     with pytest.raises(WorkflowFailureError):
-        await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", repeat_every_days=7)
+        await _run_workflow(
+            f"zenodo-harvest-{uuid.uuid4()}", repeat_every_days=7, max_runs=None
+        )
 
     [report_path] = actions_fs.rglob(REPORT_FILE)  # no second run
     assert report_path.parent.name == "run-001"
@@ -1637,7 +1639,9 @@ async def test_stopping_ends_the_repeated_runs(actions_fs, harvest_config_file):
         ):
             handle = await env.client.start_workflow(
                 ZenodoHarvestWorkflow.run,
-                ZenodoHarvestWorkflowInput(user_id="u1", repeat_every_days=7),
+                ZenodoHarvestWorkflowInput(
+                    user_id="u1", repeat_every_days=7, max_runs=None
+                ),
                 id=f"zenodo-harvest-{uuid.uuid4()}",
                 task_queue=task_queue,
             )

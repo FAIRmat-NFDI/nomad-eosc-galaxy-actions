@@ -931,11 +931,6 @@ def write_report(data: WriteReportInput) -> WriteReportResult:
     )
 
 
-def recipients(user_email: str | None, notify_email: str | None) -> str:
-    """The `To` header: the user's address and the extra one, without repeats."""
-    return ", ".join(dict.fromkeys(a for a in (user_email, notify_email) if a))
-
-
 def user_card(user: Any) -> dict[str, str] | None:
     """The ELN's user from a NOMAD user: the values it has of name, email,
     affiliation and address; None for no user."""
@@ -968,8 +963,7 @@ def _user_email(user_id: str) -> str | None:
 
 @activity.defn
 def email_report(data: EmailReportInput) -> EmailReportResult:
-    """Email `report.md` (with `report.json` attached) to the run's user and,
-    if given, to the form's extra address.
+    """Email `report.md` (with `report.json` attached) to the run's user.
 
     Also sent for a failed run; its subject then ends in "run failed".
 
@@ -983,7 +977,7 @@ def email_report(data: EmailReportInput) -> EmailReportResult:
         raise ApplicationError(str(error), non_retryable=True) from error
     if settings is None:
         return EmailReportResult(sent=False, reason="smtp_not_configured")
-    to = recipients(_user_email(data.user_id), data.notify_email)
+    to = _user_email(data.user_id)
     if not to:
         return EmailReportResult(sent=False, reason="no_email_address")
     content = json.loads(Path(data.report_path).read_text(encoding="utf-8"))

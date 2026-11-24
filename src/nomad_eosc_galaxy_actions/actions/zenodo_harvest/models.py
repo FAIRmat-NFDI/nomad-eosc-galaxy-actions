@@ -20,11 +20,14 @@ from pydantic import (
 from pydantic.json_schema import SkipJsonSchema
 
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
-    DEFAULT_LLM_MODEL,
+    load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.credentials import reveal
 
-EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+# The form shows the shipped harvest config's values as defaults, so a restarted
+# run starts with filled fields. An unchanged default leaves the setting to the
+# installation's own config (see `config_overrides`).
+SHIPPED_CONFIG = load_harvest_config()
 RECORD_ID_PATTERN = r"^\d+$"
 # Shown as suggestions under the form's query field (JSON schema `examples`).
 # Each one found records on Zenodo on 2026-11-09.
@@ -120,28 +123,28 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "unchanged. Example: on for a first test.",
     )
     galaxy_url: str | None = Field(
-        None,
-        description="Galaxy server. If empty, the harvest config's server is used. "
-        "Needs your own API key. Example: https://usegalaxy.eu",
+        SHIPPED_CONFIG.galaxy_url,
+        description="Galaxy server. If empty, the harvest config's one is used. "
+        "Another one needs your API key. Example: https://usegalaxy.eu",
     )
     galaxy_workflow_id: str | None = Field(
-        None,
+        SHIPPED_CONFIG.galaxy_workflow_id or None,
         description="ID of the harvest workflow in Galaxy. If empty, the harvest "
         "config's ID is used. Example: a82009b719022643",
     )
     zenodo_url: str | None = Field(
-        None,
+        SHIPPED_CONFIG.zenodo_url,
         description="Zenodo server. If empty, the harvest config's server is used. "
         "Gets no worker token. Example: https://sandbox.zenodo.org",
     )
     zenodo_request_delay: float | None = Field(
-        None,
+        SHIPPED_CONFIG.zenodo_request_delay,
         ge=0,
         description="Seconds between Zenodo requests. If empty or shorter, the "
         "harvest config's delay is used. Example: 5",
     )
     zenodo_query: str | None = Field(
-        None,
+        SHIPPED_CONFIG.zenodo_query,
         description="Zenodo search query. If empty, the config's is used. Click for "
         "examples. Example: STM AND resource_type.type:dataset",
         examples=ZENODO_QUERY_EXAMPLES,
@@ -153,27 +156,27 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     # The lists replace the config's lists; to extend one, give its old items too.
     raw_extensions: list[str] | None = Field(
-        None,
+        SHIPPED_CONFIG.raw_extensions,
         description="Raw file extensions converted to NeXus. Replaces the config's "
         "list; if empty, the config's is used. Example: .sxm",
     )
     context_extensions: list[str] | None = Field(
-        None,
+        SHIPPED_CONFIG.context_extensions,
         description="Extensions of files that describe the experiment; replaces the "
         "harvest config's list. Example: .txt",
     )
     ignore_patterns: list[str] | None = Field(
-        None,
+        SHIPPED_CONFIG.ignore_patterns,
         description="Glob patterns of files to skip; replaces the harvest config's "
         "list. Example: __MACOSX/*",
     )
     licenses: list[str] | None = Field(
-        None,
+        SHIPPED_CONFIG.licenses,
         description="Zenodo license IDs to accept, out of the harvest config's. "
         "If empty, all of them are accepted. Example: cc-by-4.0",
     )
     max_records: int | None = Field(
-        None,
+        1,
         ge=1,
         description="At most this many Zenodo records with new work. If empty, no "
         "limit. Example: 6, with records_per_work_list 2 → 3 runs",
@@ -185,13 +188,13 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "Example: 2 with max_records 6 → 3 Galaxy runs of 2 records",
     )
     repeat_every_days: int | None = Field(
-        None,
+        7,
         ge=1,
         description="Repeat the run every N days until stopped. If empty, it runs "
         "once. Example: 7",
     )
     max_runs: int | None = Field(
-        None,
+        1,
         ge=1,
         description="With repeat_every_days: number of runs, the first included. "
         "Example: 4 → this run and 3 repeats",
@@ -207,16 +210,10 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "quoted from the dataset are kept. Example: on",
     )
     llm_model: str | None = Field(
-        DEFAULT_LLM_MODEL,
+        SHIPPED_CONFIG.llm_model,
         description="LLM Hub multimodal model. If empty, the config's is used. "
         "Example: gemma-4-31b-llmlb-freiburg",
         examples=LLM_MODEL_EXAMPLES,
-    )
-    notify_email: str | None = Field(
-        None,
-        pattern=EMAIL_PATTERN,
-        description="Extra address that also gets the run report. "
-        "Example: name@example.org",
     )
     galaxy_api_key: SecretStr | None = Field(
         None,
@@ -261,7 +258,7 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     @model_validator(mode="after")
     def _own_galaxy_key_for_own_galaxy(self) -> "ZenodoHarvestWorkflowInput":
         """The worker's GALAXY_API_KEY is only sent to the harvest config's Galaxy."""
-        if self.galaxy_url and not reveal(self.galaxy_api_key):
+        if self.config_overrides()["galaxy_url"] and not reveal(self.galaxy_api_key):
             raise ValueError("galaxy_url is set: also give your galaxy_api_key")
         return self
 
@@ -280,7 +277,6 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "zenodo_url",
         "zenodo_query",
         "llm_model",
-        "notify_email",
         mode="before",
     )
     @classmethod
@@ -308,8 +304,18 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         return reveal(value)
 
     def config_overrides(self) -> dict[str, Any]:
-        """Keyword arguments for the activity inputs based on ConfigOverrides."""
-        return {name: getattr(self, name) for name in ConfigOverrides.model_fields}
+        """Keyword arguments for the activity inputs based on ConfigOverrides.
+
+        A value equal to the form's default is None, so the installation's
+        harvest config is used. Typing that same value in the form does not
+        override a different installation config.
+        """
+        overrides = {}
+        for name in ConfigOverrides.model_fields:
+            value = getattr(self, name)
+            unchanged = value == type(self).model_fields[name].default
+            overrides[name] = None if unchanged else value
+        return overrides
 
 
 class GalaxyKeyInput(ConfigOverrides):
@@ -558,7 +564,6 @@ class EmailReportInput(BaseModel):
     report_path: str
     markdown_path: str
     user_id: str = Field(..., description="Recipient: the user who started the run.")
-    notify_email: str | None = Field(None, description="One more recipient.")
 
 
 class EmailReportResult(BaseModel):

@@ -73,7 +73,8 @@ class ZenodoHarvestWorkflow:
         # workflow.now(), not datetime.now(): workflow code must be
         # deterministic, so time comes from Temporal's replayable clock.
         started = workflow.now()
-        if not data.repeat_every_days:
+        # max_runs 1 (the form's default) is one run, like no repeat at all.
+        if not data.repeat_every_days or data.max_runs == 1:
             return await self._harvest(data, workflow.info().workflow_id, None)
 
         number = data.run_number
@@ -509,7 +510,6 @@ class ZenodoHarvestWorkflow:
                     report_path=written.report_path,
                     markdown_path=written.markdown_path,
                     user_id=data.user_id,
-                    notify_email=data.notify_email,
                 ),
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=retry_policy,

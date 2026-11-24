@@ -21,7 +21,7 @@ Once `COMPLETED`, a new entry appears in the same upload: the original spectrum'
 
 The **ZenodoHarvestAction** finds openly licensed SPM (scanning probe microscopy, e.g. STM, STS and AFM) datasets on Zenodo, converts their raw files to NeXus on Galaxy and stores each Zenodo dataset as a private NOMAD project, with one folder per record version. It remembers what it has processed, so the next run only handles new files.
 
-Most form fields are empty by default. If a field is empty, the Action uses the value from the harvest config (see [Worker settings](#worker-settings)). A list in the form replaces the config's list for this run. To extend a list, enter the config's items and the new ones.
+The form fields are filled with the values of the harvest config that ships with the Action, so a new or restarted run needs few inputs. If you keep a default or empty a field, the Action uses the value from this installation's harvest config (see [Worker settings](#worker-settings)). A changed value replaces the config's value for this run. A list in the form replaces the config's list. To extend a list, enter the config's items and the new ones.
 
 Start it from **Actions** in the main menu of the NOMAD user interface. No project needs to be selected.
 
@@ -30,9 +30,9 @@ Start it from **Actions** in the main menu of the NOMAD user interface. No proje
 | Field | Meaning |
 |---|---|
 | `dry_run` | Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. This is the default behavior. |
-| `galaxy_url` | Galaxy server. If this is empty, the Action uses the harvest config's `galaxy_url`. If set, `galaxy_api_key` is required: the worker's key is only sent to the config's Galaxy. |
+| `galaxy_url` | Galaxy server. If this is empty, the Action uses the harvest config's `galaxy_url`. If you change it, `galaxy_api_key` is required: the worker's key is only sent to the config's Galaxy. |
 | `galaxy_workflow_id` | ID of the harvest workflow in Galaxy. If this is empty, the Action uses the harvest config's `galaxy_workflow_id`. |
-| `zenodo_url` | Zenodo server, e.g. `https://sandbox.zenodo.org`. If this is empty, the Action uses the harvest config's `zenodo_url`. If set, the worker's `ZENODO_TOKEN` is not sent. |
+| `zenodo_url` | Zenodo server, e.g. `https://sandbox.zenodo.org`. If this is empty, the Action uses the harvest config's `zenodo_url`. If you change it, the worker's `ZENODO_TOKEN` is not sent. |
 | `zenodo_request_delay` | Seconds between Zenodo requests. If this is empty or shorter than the harvest config's value, the Action uses the config's value. |
 | `zenodo_query` | Zenodo search query ([search syntax](https://help.zenodo.org/guides/search/){:target="_blank" rel="noopener"}). If this is empty, the Action uses the harvest config's `zenodo_query`. |
 | `zenodo_record_ids` | Only these Zenodo records, in place of the query. A concept record ID means its latest version. Unknown IDs are reported as `not_found`. |
@@ -40,14 +40,13 @@ Start it from **Actions** in the main menu of the NOMAD user interface. No proje
 | `context_extensions` | Extensions of files that describe the experiment, sent along with each raw file. Replaces the config's list. |
 | `ignore_patterns` | Glob patterns of files that are skipped, e.g. `__MACOSX/*`. Replaces the config's list. |
 | `licenses` | Zenodo license IDs to accept, e.g. `cc-by-4.0`. Only the config's licenses are allowed. If this is empty, all of them are accepted. |
-| `max_records` | Process at most this many Zenodo records with new work. If this is empty, there is no limit. |
+| `max_records` | Process at most this many Zenodo records with new work. The default is 1. If this is empty, there is no limit. |
 | `records_per_work_list` | Zenodo records sent to Galaxy together in one work list. Each work list is one Galaxy run. The default is 1. If this is empty, all records go into one work list. Example: `max_records` 6 and `records_per_work_list` 2 → 6 records in 3 Galaxy runs of 2 records. |
-| `repeat_every_days` | Start a new run this many days after the previous one started (7 = weekly). If this is empty, the Action runs once. |
-| `max_runs` | With `repeat_every_days`: stop after this many runs. If this is empty, the runs go on until the Action is stopped. |
+| `repeat_every_days` | Start a new run this many days after the previous one started. The default is 7 (weekly). If this is empty, the Action runs once. |
+| `max_runs` | With `repeat_every_days`: stop after this many runs. The default is 1, so the Action runs once. If this is empty, the runs go on until the Action is stopped. |
 | `allow_duplicate_projects` | If on, also convert raw files that are already in one of your NOMAD projects. Off by default. |
 | `use_llm` | An LLM ([LLM Hub](https://galaxyproject.org/news/2025-10-10-llm-hub/){:target="_blank" rel="noopener"} on Galaxy) fills the ELN fields the rules leave empty, e.g. sample and instrument. On by default. See [LLM-written ELN](#llm-written-eln). |
 | `llm_model` | LLM Hub **multimodal** model. The default is `mistral-medium-3.5-e-infra.cz` (usegalaxy.eu). If this is empty, the Action uses the harvest config's `llm_model`. |
-| `notify_email` | Optional. One more address that gets the run's report, besides your NOMAD account's address. |
 | `galaxy_api_key` | Your Galaxy API key. If this is empty, the Action uses the worker's `GALAXY_API_KEY`, if the administrators set one. |
 | `zenodo_token` | Optional Zenodo token for larger search pages. If this is empty, the Action uses the worker's `ZENODO_TOKEN`, if set. |
 
