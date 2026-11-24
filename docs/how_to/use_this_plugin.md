@@ -21,7 +21,7 @@ Once `COMPLETED`, a new entry appears in the same upload: the original spectrum'
 
 The **ZenodoHarvestAction** finds openly licensed SPM (scanning probe microscopy, e.g. STM, STS and AFM) datasets on Zenodo, converts their raw files to NeXus on Galaxy and stores each Zenodo dataset as a private NOMAD project, with one folder per record version. It remembers what it has processed, so the next run only handles new files.
 
-The form fields are filled with the values of the harvest config that ships with the Action, so a new or restarted run needs few inputs. If you keep a default or empty a field, the Action uses the value from this installation's harvest config (see [Worker settings](#worker-settings)). A changed value replaces the config's value for this run. A list in the form replaces the config's list. To extend a list, enter the config's items and the new ones.
+The form fields are filled with this installation's harvest config (see [Worker settings](#worker-settings)), so a new or restarted run needs few inputs. The run uses the values in the form. If you empty a field, the Action uses the config's value. A list in the form replaces the config's list. To extend a list, add the new items to the shown ones.
 
 Start it from **Actions** in the main menu of the NOMAD user interface. No project needs to be selected.
 
@@ -30,9 +30,9 @@ Start it from **Actions** in the main menu of the NOMAD user interface. No proje
 | Field | Meaning |
 |---|---|
 | `dry_run` | Search, plan and convert, but create no NOMAD projects and keep the record of processed files unchanged. This is the default behavior. |
-| `galaxy_url` | Galaxy server. If this is empty, the Action uses the harvest config's `galaxy_url`. If you change it, `galaxy_api_key` is required: the worker's key is only sent to the config's Galaxy. |
+| `galaxy_url` | Galaxy server. If this is empty, the Action uses the harvest config's `galaxy_url`. If it is not the config's server, `galaxy_api_key` is required: the worker's key is only sent to the config's Galaxy. |
 | `galaxy_workflow_id` | ID of the harvest workflow in Galaxy. If this is empty, the Action uses the harvest config's `galaxy_workflow_id`. |
-| `zenodo_url` | Zenodo server, e.g. `https://sandbox.zenodo.org`. If this is empty, the Action uses the harvest config's `zenodo_url`. If you change it, the worker's `ZENODO_TOKEN` is not sent. |
+| `zenodo_url` | Zenodo server, e.g. `https://sandbox.zenodo.org`. If this is empty, the Action uses the harvest config's `zenodo_url`. If it is not the config's server, the worker's `ZENODO_TOKEN` is not sent. |
 | `zenodo_request_delay` | Seconds between Zenodo requests. If this is empty or shorter than the harvest config's value, the Action uses the config's value. |
 | `zenodo_query` | Zenodo search query ([search syntax](https://help.zenodo.org/guides/search/){:target="_blank" rel="noopener"}). If this is empty, the Action uses the harvest config's `zenodo_query`. |
 | `zenodo_record_ids` | Only these Zenodo records, in place of the query. A concept record ID means its latest version. Unknown IDs are reported as `not_found`. |
@@ -141,7 +141,15 @@ Each run writes `report.json` and `report.md` into its run folder (and a copy in
 
 ### Worker settings
 
-Settings that stay with the installation are in the harvest config file (`actions/zenodo_harvest/config/harvest_config.json`, or the file in the entry point's `harvest_config_path`). `schema_version`, `max_archive_bytes`, `max_uncompressed_bytes`, `nomad_url`, `state_dir` and `eln_user` are only set here; the other settings are defaults for the form. `state_dir` sets where the records of processed files are kept. If it is empty, they are kept in NOMAD's action artifacts folder. `llm_model` is the LLM Hub model used when the form's model is empty. `eln_user` (on by default) writes the user who runs the harvest into the ELNs, see [ELN user](#eln-user). Both came with version 4 of the file; older files get them on load.
+The harvest config ships with the Action in `actions/zenodo_harvest/config/harvest_config.json`. An installation can change some settings with its own file, named in the entry point's `harvest_config_path` in `nomad.yaml`. Only the keys in that file replace the shipped values; `schema_version` is optional there. Example: this file changes only the accepted licenses.
+
+```json
+{"licenses": ["cc-zero"]}
+```
+
+The form shows the combined settings. NOMAD reads them at start-up, so restart NOMAD after you change the file. A bad file (unknown key or invalid value) stops the Action from loading, and the error names the file.
+
+`schema_version`, `max_archive_bytes`, `max_uncompressed_bytes`, `nomad_url`, `state_dir` and `eln_user` are only set here; the other settings are defaults for the form. `state_dir` sets where the records of processed files are kept. If it is empty, they are kept in NOMAD's action artifacts folder. `llm_model` is the LLM Hub model used when the form's model is empty. `eln_user` (on by default) writes the user who runs the harvest into the ELNs, see [ELN user](#eln-user). Both came with version 4 of the file; older files get them on load.
 
 The report email uses NOMAD's own mail server: the [`mail` section of `nomad.yaml`](https://docs.nomad-lab.eu/reference/config.html#mail){:target="_blank" rel="noopener"}. Without `mail.enabled`, no email is sent.
 

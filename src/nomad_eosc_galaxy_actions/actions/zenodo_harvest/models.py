@@ -18,16 +18,16 @@ from pydantic import (
     model_validator,
 )
 from pydantic.json_schema import SkipJsonSchema
+from temporalio import workflow
 
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
-    load_harvest_config,
+    installation_config,
 )
 from nomad_eosc_galaxy_actions.credentials import reveal
 
-# The form shows the shipped harvest config's values as defaults, so a restarted
-# run starts with filled fields. An unchanged default leaves the setting to the
-# installation's own config (see `config_overrides`).
-SHIPPED_CONFIG = load_harvest_config()
+# The form's defaults: this installation's harvest config, read once at start-up.
+# The run uses the form's values; an empty field uses the config's value.
+FORM_CONFIG = installation_config()
 RECORD_ID_PATTERN = r"^\d+$"
 # Shown as suggestions under the form's query field (JSON schema `examples`).
 # Each one found records on Zenodo on 2026-11-09.
@@ -123,28 +123,28 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "unchanged. Example: on for a first test.",
     )
     galaxy_url: str | None = Field(
-        SHIPPED_CONFIG.galaxy_url,
+        FORM_CONFIG.galaxy_url,
         description="Galaxy server. If empty, the harvest config's one is used. "
         "Another one needs your API key. Example: https://usegalaxy.eu",
     )
     galaxy_workflow_id: str | None = Field(
-        SHIPPED_CONFIG.galaxy_workflow_id or None,
+        FORM_CONFIG.galaxy_workflow_id or None,
         description="ID of the harvest workflow in Galaxy. If empty, the harvest "
         "config's ID is used. Example: a82009b719022643",
     )
     zenodo_url: str | None = Field(
-        SHIPPED_CONFIG.zenodo_url,
+        FORM_CONFIG.zenodo_url,
         description="Zenodo server. If empty, the harvest config's server is used. "
         "Gets no worker token. Example: https://sandbox.zenodo.org",
     )
     zenodo_request_delay: float | None = Field(
-        SHIPPED_CONFIG.zenodo_request_delay,
+        FORM_CONFIG.zenodo_request_delay,
         ge=0,
         description="Seconds between Zenodo requests. If empty or shorter, the "
         "harvest config's delay is used. Example: 5",
     )
     zenodo_query: str | None = Field(
-        SHIPPED_CONFIG.zenodo_query,
+        FORM_CONFIG.zenodo_query,
         description="Zenodo search query. If empty, the config's is used. Click for "
         "examples. Example: STM AND resource_type.type:dataset",
         examples=ZENODO_QUERY_EXAMPLES,
@@ -156,22 +156,22 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     # The lists replace the config's lists; to extend one, give its old items too.
     raw_extensions: list[str] | None = Field(
-        SHIPPED_CONFIG.raw_extensions,
+        FORM_CONFIG.raw_extensions,
         description="Raw file extensions converted to NeXus. Replaces the config's "
         "list; if empty, the config's is used. Example: .sxm",
     )
     context_extensions: list[str] | None = Field(
-        SHIPPED_CONFIG.context_extensions,
+        FORM_CONFIG.context_extensions,
         description="Extensions of files that describe the experiment; replaces the "
         "harvest config's list. Example: .txt",
     )
     ignore_patterns: list[str] | None = Field(
-        SHIPPED_CONFIG.ignore_patterns,
+        FORM_CONFIG.ignore_patterns,
         description="Glob patterns of files to skip; replaces the harvest config's "
         "list. Example: __MACOSX/*",
     )
     licenses: list[str] | None = Field(
-        SHIPPED_CONFIG.licenses,
+        FORM_CONFIG.licenses,
         description="Zenodo license IDs to accept, out of the harvest config's. "
         "If empty, all of them are accepted. Example: cc-by-4.0",
     )
@@ -210,7 +210,7 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "quoted from the dataset are kept. Example: on",
     )
     llm_model: str | None = Field(
-        SHIPPED_CONFIG.llm_model,
+        FORM_CONFIG.llm_model,
         description="LLM Hub multimodal model. If empty, the config's is used. "
         "Example: gemma-4-31b-llmlb-freiburg",
         examples=LLM_MODEL_EXAMPLES,
@@ -257,9 +257,18 @@ class ZenodoHarvestWorkflowInput(BaseModel):
 
     @model_validator(mode="after")
     def _own_galaxy_key_for_own_galaxy(self) -> "ZenodoHarvestWorkflowInput":
-        """The worker's GALAXY_API_KEY is only sent to the harvest config's Galaxy."""
-        if self.config_overrides()["galaxy_url"] and not reveal(self.galaxy_api_key):
-            raise ValueError("galaxy_url is set: also give your galaxy_api_key")
+        """The worker's GALAXY_API_KEY is only sent to the harvest config's Galaxy.
+
+        Checked when NOMAD validates the form. Skipped in workflow code, which must
+        not read files; the activities check it again (`_config_server`).
+        """
+        if workflow.in_workflow() or not self.galaxy_url:
+            return self
+        config_galaxy = installation_config().galaxy_url
+        if self.galaxy_url != config_galaxy and not reveal(self.galaxy_api_key):
+            raise ValueError(
+                "galaxy_url is not the harvest config's: also give your galaxy_api_key"
+            )
         return self
 
     @field_validator("zenodo_record_ids")
@@ -304,18 +313,8 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         return reveal(value)
 
     def config_overrides(self) -> dict[str, Any]:
-        """Keyword arguments for the activity inputs based on ConfigOverrides.
-
-        A value equal to the form's default is None, so the installation's
-        harvest config is used. Typing that same value in the form does not
-        override a different installation config.
-        """
-        overrides = {}
-        for name in ConfigOverrides.model_fields:
-            value = getattr(self, name)
-            unchanged = value == type(self).model_fields[name].default
-            overrides[name] = None if unchanged else value
-        return overrides
+        """Keyword arguments for the activity inputs based on ConfigOverrides."""
+        return {name: getattr(self, name) for name in ConfigOverrides.model_fields}
 
 
 class GalaxyKeyInput(ConfigOverrides):

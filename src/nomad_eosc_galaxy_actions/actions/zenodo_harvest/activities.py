@@ -34,7 +34,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest import (
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     HarvestConfig,
     HarvestConfigError,
-    load_harvest_config,
+    installation_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.local_projects import (
     LocalLookup,
@@ -81,9 +81,6 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import (
     release_run,
 )
 
-ZENODO_HARVEST_ACTION = (
-    "nomad_eosc_galaxy_actions.actions.zenodo_harvest:zenodo_harvest_action"
-)
 RUN_CONFIG_FILE = "run_config.json"
 # Version of the run_config.json layout. Bump it when a key is renamed,
 # removed or changes meaning, so readers can recognize older files.
@@ -132,17 +129,19 @@ PAGE_SIZE_AUTHENTICATED = 100
 
 
 def _harvest_config(overrides: ConfigOverrides | None = None) -> HarvestConfig:
-    """Load the harvest config file named by the entry point (or the shipped one),
-    with the form's values in place of the file's ones."""
-    from nomad.config import config  # noqa: PLC0415
-
-    entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
+    """This installation's harvest config (see `installation_config`), with the
+    form's values in place of the config's ones."""
     try:
-        harvest_config = load_harvest_config(entry_point.harvest_config_path)
-        return apply_overrides(harvest_config, overrides)
+        return apply_overrides(installation_config(), overrides)
     except (FileNotFoundError, HarvestConfigError) as error:
         # Loading again gives the same error, so do not retry.
         raise ApplicationError(str(error), non_retryable=True) from error
+
+
+def _config_server(form_url: str | None, name: str) -> bool:
+    """True if the form's URL is empty or the config's one: only then may the
+    worker's own secret be sent to it."""
+    return not form_url or form_url == getattr(_harvest_config(), name)
 
 
 def apply_overrides(
@@ -191,7 +190,8 @@ def _secret(
 
 def _galaxy_key(data: GalaxyKeyInput) -> str:
     """The form's Galaxy API key, else the worker's (only for the config's Galaxy)."""
-    return _secret("galaxy", data.galaxy_api_key, worker=not data.galaxy_url)
+    worker = _config_server(data.galaxy_url, "galaxy_url")
+    return _secret("galaxy", data.galaxy_api_key, worker=worker)
 
 
 def _state_dir(harvest_config: HarvestConfig) -> Path:
@@ -374,7 +374,10 @@ def search_zenodo(data: SearchZenodoInput) -> SearchZenodoResult:
     """
     harvest_config = _harvest_config(data)
     token = _secret(
-        "zenodo", data.zenodo_token, required=False, worker=not data.zenodo_url
+        "zenodo",
+        data.zenodo_token,
+        required=False,
+        worker=_config_server(data.zenodo_url, "zenodo_url"),
     )
     session = zenodo_client.make_session(token)
     missing: list[zenodo_client.Rejection] = []

@@ -17,7 +17,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
-    SHIPPED_CONFIG,
+    FORM_CONFIG,
     ZENODO_QUERY_EXAMPLES,
     BuildWorkListInput,
     ConfigOverrides,
@@ -31,13 +31,14 @@ def _form(**values) -> ZenodoHarvestWorkflowInput:
     return ZenodoHarvestWorkflowInput(user_id="u1", **values)
 
 
-def test_form_defaults_are_the_shipped_config():
+def test_form_defaults_are_the_installation_config():
     properties = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
 
     for name in ConfigOverrides.model_fields:
-        expected = getattr(SHIPPED_CONFIG, name) or None  # "" is shown empty
+        expected = getattr(FORM_CONFIG, name) or None  # "" is shown empty
         assert properties[name].get("default") == expected, name
-    assert SHIPPED_CONFIG == load_harvest_config(DEFAULT_HARVEST_CONFIG)
+    # No entry point is loaded when the tests import the models: the shipped config.
+    assert FORM_CONFIG == load_harvest_config(DEFAULT_HARVEST_CONFIG)
 
 
 def test_form_defaults_without_a_config_value():
@@ -51,9 +52,13 @@ def test_form_defaults_without_a_config_value():
     ) == expected
 
 
-def test_unchanged_defaults_leave_every_setting_to_the_config():
+def test_form_values_reach_the_run_as_shown():
     form = _form()
-    assert form.config_overrides() == dict.fromkeys(ConfigOverrides.model_fields)
+    expected = {
+        name: getattr(FORM_CONFIG, name) or None
+        for name in ConfigOverrides.model_fields
+    }
+    assert form.config_overrides() == expected
 
 
 def test_a_restarted_run_keeps_the_values():
@@ -68,8 +73,8 @@ def test_a_restarted_run_keeps_the_values():
 
 def test_default_lists_are_not_shared():
     _form().raw_extensions.append(".xyz")
-    assert _form().raw_extensions == SHIPPED_CONFIG.raw_extensions
-    assert ".xyz" not in SHIPPED_CONFIG.raw_extensions
+    assert _form().raw_extensions == FORM_CONFIG.raw_extensions
+    assert ".xyz" not in FORM_CONFIG.raw_extensions
 
 
 def test_notify_email_is_gone():
@@ -166,10 +171,9 @@ def test_own_galaxy_url_needs_own_key(key):
         _form(galaxy_url="https://usegalaxy.org", galaxy_api_key=key)
 
 
-@pytest.mark.parametrize("url", [SHIPPED_CONFIG.galaxy_url, "https://usegalaxy.eu/"])
+@pytest.mark.parametrize("url", [FORM_CONFIG.galaxy_url, "https://usegalaxy.eu/"])
 def test_default_galaxy_url_needs_no_key(url):
-    form = _form(galaxy_url=url)
-    assert form.config_overrides()["galaxy_url"] is None  # the worker's key is used
+    assert _form(galaxy_url=url).galaxy_url == FORM_CONFIG.galaxy_url
 
 
 def test_own_galaxy_url_with_own_key():
@@ -345,20 +349,13 @@ def _installation_config():
     )
 
 
-def test_unchanged_defaults_keep_the_installation_config():
-    config = _installation_config()
-    # The shipped licenses are not a subset of the installation's, so no error.
-    assert apply_overrides(config, _overrides()) == config
-
-
-def test_changed_values_replace_the_installation_config():
-    data = _overrides(zenodo_query="AFM", llm_model="mistral-small-4-llmlb-freiburg")
+def test_form_values_replace_the_installation_config():
+    data = _overrides(zenodo_query="AFM", licenses=["cc-zero"])
 
     config = apply_overrides(_installation_config(), data)
 
     assert config.zenodo_query == "AFM"
-    assert config.llm_model == "mistral-small-4-llmlb-freiburg"
-    assert config.galaxy_url == "https://usegalaxy.org"  # unchanged default
+    assert config.galaxy_url == FORM_CONFIG.galaxy_url  # the form's value wins
 
 
 def test_empty_form_values_keep_the_config():

@@ -44,7 +44,6 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     STATE_FILE,
     STATE_PROJECT,
     WORK_LIST_FILE,
-    ZENODO_HARVEST_ACTION,
     build_work_list,
     create_projects,
     email_report,
@@ -65,10 +64,13 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     DEFAULT_HARVEST_CONFIG,
+    ZENODO_HARVEST_ACTION,
     HarvestConfig,
+    installation_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
+    ConfigOverrides,
     CreateProjectsInput,
     EmailReportInput,
     FetchManifestInput,
@@ -316,6 +318,15 @@ ALL_ACTIVITIES = [
 ]
 
 
+def _workflow_input(**inputs) -> ZenodoHarvestWorkflowInput:
+    """The form as NOMAD shows it for the test installation, with `inputs` changed."""
+    config = installation_config()
+    shown = {
+        name: getattr(config, name) or None for name in ConfigOverrides.model_fields
+    }
+    return ZenodoHarvestWorkflowInput(user_id="u1", **(shown | inputs))
+
+
 async def _run_workflow(
     workflow_id: str, max_records: int | None = 2, dry_run: bool = True, **inputs
 ) -> dict:
@@ -334,9 +345,7 @@ async def _run_workflow(
         ):
             return await env.client.execute_workflow(
                 ZenodoHarvestWorkflow.run,
-                ZenodoHarvestWorkflowInput(
-                    user_id="u1", max_records=max_records, dry_run=dry_run, **inputs
-                ),
+                _workflow_input(max_records=max_records, dry_run=dry_run, **inputs),
                 id=workflow_id,
                 task_queue=task_queue,
             )
@@ -387,6 +396,11 @@ def test_worker_token_is_not_sent_to_the_form_zenodo(
     tmp_path, fake_zenodo, harvest_config_file, monkeypatch
 ):
     monkeypatch.setenv("ZENODO_TOKEN", "worker-token")
+    # The config names another Zenodo; the form's one gets no worker token.
+    content = json.loads(harvest_config_file.read_text())
+    harvest_config_file.write_text(
+        json.dumps(content | {"zenodo_url": "https://zenodo.org"})
+    )
 
     ActivityEnvironment().run(
         search_zenodo,
@@ -668,8 +682,15 @@ def test_galaxy_needs_api_key(tmp_path, galaxy_config, monkeypatch):
     assert galaxy_config.requests == []
 
 
-def test_worker_key_is_not_sent_to_the_form_galaxy(tmp_path, galaxy_config):
+def test_worker_key_is_not_sent_to_the_form_galaxy(
+    tmp_path, galaxy_config, harvest_config_file
+):
     path = _work_list(tmp_path)
+    # The config names another Galaxy; the form's one gets no worker key.
+    content = json.loads(harvest_config_file.read_text())
+    harvest_config_file.write_text(
+        json.dumps(content | {"galaxy_url": "https://usegalaxy.eu"})
+    )
 
     with pytest.raises(ApplicationError, match="only sent to the harvest config"):
         ActivityEnvironment().run(
@@ -1639,9 +1660,7 @@ async def test_stopping_ends_the_repeated_runs(actions_fs, harvest_config_file):
         ):
             handle = await env.client.start_workflow(
                 ZenodoHarvestWorkflow.run,
-                ZenodoHarvestWorkflowInput(
-                    user_id="u1", repeat_every_days=7, max_runs=None
-                ),
+                _workflow_input(repeat_every_days=7, max_runs=None),
                 id=f"zenodo-harvest-{uuid.uuid4()}",
                 task_queue=task_queue,
             )

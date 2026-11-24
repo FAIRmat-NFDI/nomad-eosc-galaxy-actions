@@ -70,13 +70,10 @@ def test_load_rejects_invalid_settings(tmp_path, shipped, change, message):
         load_harvest_config(path)
 
 
-def test_load_rejects_missing_setting(tmp_path, shipped):
+def test_missing_setting_keeps_the_shipped_value(tmp_path, shipped):
     del shipped["zenodo_query"]
     path = _write(tmp_path, shipped)
-    with pytest.raises(
-        HarvestConfigError, match=f"^{re.escape(str(path))}: zenodo_query: Field"
-    ):
-        load_harvest_config(path)
+    assert load_harvest_config(path).zenodo_query == load_harvest_config().zenodo_query
 
 
 @pytest.mark.parametrize(
