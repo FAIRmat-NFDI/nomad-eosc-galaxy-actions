@@ -86,8 +86,8 @@ class HarvestConfig(BaseModel):
             "per minute (https://developers.zenodo.org/#rate-limiting)."
         ),
     )
-    # TODO: Add all the file extensions once we test for .sxm files in the
-    # development workflow.
+    # The pynxtools-spm reader's formats; Bruker text exports as `.spm.txt`, so a
+    # readme `.txt` stays context (raw is matched first).
     raw_extensions: list[str] = Field(
         description="File extensions converted to NeXus (role 'raw')."
     )

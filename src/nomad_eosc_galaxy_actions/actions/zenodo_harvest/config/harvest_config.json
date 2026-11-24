@@ -3,7 +3,7 @@
   "zenodo_url": "https://zenodo.org",
   "zenodo_query": "(\"scanning tunneling microscopy\" OR STM) AND (Nanonis OR \".sxm\") AND resource_type.type:dataset",
   "zenodo_request_delay": 2.0,
-  "raw_extensions": [".sxm"],
+  "raw_extensions": [".sxm", ".dat", ".sm4", ".spm", ".spm.txt", ".flt"],
   "context_extensions": [".txt", ".md", ".pdf", ".rtf", ".csv", ".json", ".yaml", ".yml", ".docx"],
   "ignore_patterns": ["__MACOSX/*", "*.DS_Store", "*.mp4"],
   "licenses": ["cc-zero", "cc-by-4.0"],

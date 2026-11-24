@@ -67,8 +67,9 @@ def test_a_restarted_run_keeps_the_values():
 
 
 def test_default_lists_are_not_shared():
-    _form().raw_extensions.append(".dat")
-    assert _form().raw_extensions == SHIPPED_CONFIG.raw_extensions == [".sxm"]
+    _form().raw_extensions.append(".xyz")
+    assert _form().raw_extensions == SHIPPED_CONFIG.raw_extensions
+    assert ".xyz" not in SHIPPED_CONFIG.raw_extensions
 
 
 def test_notify_email_is_gone():
