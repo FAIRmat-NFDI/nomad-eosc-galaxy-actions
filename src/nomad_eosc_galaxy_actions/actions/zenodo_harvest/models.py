@@ -215,13 +215,17 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "Example: gemma-4-31b-llmlb-freiburg",
         examples=LLM_MODEL_EXAMPLES,
     )
+    # An empty secret stays None but is left out of the saved input: on a rerun
+    # the GUI refuses a null in a password field ("must be string").
     galaxy_api_key: SecretStr | None = Field(
         None,
+        exclude_if=lambda value: value is None,
         description="Your Galaxy API key (User > Preferences > Manage API Key). "
         "If empty, the worker's GALAXY_API_KEY is used.",
     )
     zenodo_token: SecretStr | None = Field(
         None,
+        exclude_if=lambda value: value is None,
         description="Optional Zenodo token for larger search pages. If empty, "
         "the worker's ZENODO_TOKEN is used.",
     )

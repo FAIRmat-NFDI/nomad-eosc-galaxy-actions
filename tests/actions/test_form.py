@@ -77,6 +77,22 @@ def test_default_lists_are_not_shared():
     assert ".xyz" not in FORM_CONFIG.raw_extensions
 
 
+def test_empty_secrets_are_not_saved_as_null():
+    from nomad.actions.serialization import _to_dict  # noqa: PLC0415
+
+    form = _form(galaxy_api_key="key")
+
+    assert form.zenodo_token is None
+    # NOMAD saves the input for a rerun; neither key is in it.
+    saved = _to_dict(form)
+    assert not {"galaxy_api_key", "zenodo_token"} & set(saved)
+    assert ZenodoHarvestWorkflowInput.model_validate(saved).zenodo_token is None
+    # Temporal gets the given key, and no null for the empty one.
+    sent = json.loads(form.model_dump_json())
+    assert sent["galaxy_api_key"] == "key"
+    assert "zenodo_token" not in sent
+
+
 def test_notify_email_is_gone():
     properties = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
     assert "notify_email" not in properties
