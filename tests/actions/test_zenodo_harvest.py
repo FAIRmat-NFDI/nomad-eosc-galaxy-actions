@@ -718,14 +718,28 @@ def test_galaxy_key_from_the_form_wins(tmp_path, galaxy_config):
 @pytest.mark.parametrize(
     "case",
     [
-        (["running"], False, "running", None),
-        (["ok"], True, "ok", "out-1"),
-        (["error"], True, "error", None),
+        # The bug: the known jobs are `ok`, but Galaxy is still making jobs.
+        ("ready", "ok", False, "ready", None),
+        ("new", "ok", False, "new", None),
+        ("scheduled", "running", False, "running", None),
+        ("scheduled", {"ok": 2, "queued": 25}, False, "running", None),
+        ("scheduled", {}, False, "running", None),
+        ("scheduled", "ok", True, "ok", "out-1"),
+        ("scheduled", {"ok": 3, "skipped": 1}, True, "ok", "out-1"),
+        ("completed", "ok", True, "ok", "out-1"),
+        ("completed", {}, True, "ok", "out-1"),
+        # Failed and paused jobs end the run too.
+        ("scheduled", {"ok": 2, "error": 1, "paused": 4}, True, "partial", "out-1"),
+        ("completed", "paused", True, "partial", "out-1"),
+        ("failed", "ok", True, "error", None),
+        ("cancelled", "running", True, "error", None),
+        ("cancelling", "running", False, "cancelling", None),
     ],
 )
 def test_poll_galaxy_activity(galaxy_config, case):
-    job_states, done, state, manifest_id = case
-    galaxy_config.job_states = job_states
+    invocation_state, job_states, done, state, manifest_id = case
+    galaxy_config.invocation_states = [invocation_state]
+    galaxy_config.job_states = [job_states]
 
     result = ActivityEnvironment().run(
         poll_galaxy, PollGalaxyInput(invocation_id="inv-1")
@@ -733,6 +747,50 @@ def test_poll_galaxy_activity(galaxy_config, case):
 
     assert (result.done, result.state) == (done, state)
     assert (result.outputs or {}).get("manifest") == manifest_id
+
+
+def test_poll_galaxy_waits_until_all_jobs_exist(galaxy_config):
+    galaxy_config.invocation_states = ["ready", "scheduled", "scheduled"]
+    galaxy_config.job_states = [{"ok": 2, "running": 26}, {"ok": 28}]
+
+    polls = [
+        ActivityEnvironment().run(poll_galaxy, PollGalaxyInput(invocation_id="inv-1"))
+        for _ in range(3)
+    ]
+
+    assert [(p.done, p.state) for p in polls] == [
+        (False, "ready"),
+        (False, "running"),
+        (True, "ok"),
+    ]
+
+
+def test_poll_galaxy_keeps_only_finished_outputs(galaxy_config):
+    """Galaxy makes the outputs of a paused step; they are left out."""
+    galaxy_config.job_states = [{"ok": 2, "error": 1, "paused": 1}]
+    galaxy_config.invocation_outputs |= {"results": {"id": "out-2", "src": "hda"}}
+    galaxy_config.invocation_collections = {"projects": {"id": "coll-1"}}
+    galaxy_config.dataset_states = {"out-2": "paused"}
+    galaxy_config.collection_states = {"coll-1": "new"}
+
+    result = ActivityEnvironment().run(
+        poll_galaxy, PollGalaxyInput(invocation_id="inv-1")
+    )
+
+    assert (result.done, result.state) == (True, "partial")
+    assert result.outputs == {"manifest": "out-1", "out_file1": "out-1"}
+
+
+def test_poll_galaxy_keeps_finished_collections(galaxy_config):
+    galaxy_config.job_states = [{"ok": 5, "error": 1}]
+    galaxy_config.invocation_collections = {"projects": {"id": "coll-1"}}
+
+    result = ActivityEnvironment().run(
+        poll_galaxy, PollGalaxyInput(invocation_id="inv-1")
+    )
+
+    assert result.state == "partial"
+    assert result.outputs["projects"] == "coll-1"
 
 
 def _fetch(run_dir: Path, results_dataset_id: str | None = None):
@@ -1173,7 +1231,8 @@ async def test_workflow_galaxy_round_trip(actions_fs, galaxy_config):
         manifest = json.loads(Path(batch["galaxy"]["manifest_path"]).read_text())
         sent = run_dir / batch["folder"] / WORK_LIST_FILE
         assert manifest == json.loads(sent.read_text())  # the placeholder's echo
-    polls = [r for r in galaxy_config.requests if r[1] == "/api/jobs/job-1"]
+    summary = "/api/invocations/inv-1/jobs_summary"
+    polls = [r for r in galaxy_config.requests if r[1] == summary]
     assert len(polls) == 4  # noqa: PLR2004  (3 for the first batch, 1 for the second)
     assert result["nomad"] == {"status": "skipped", "reason": "placeholder"}
     assert result["merge"] == {"status": "skipped", "reason": "placeholder"}
@@ -1473,7 +1532,8 @@ async def test_failed_batch_does_not_stop_the_others(
 
     def first_fails(work_list):
         convert(work_list)
-        fake_galaxy.job_states = ["error" if len(fake_galaxy.work_lists) == 1 else "ok"]
+        first = len(fake_galaxy.work_lists) == 1
+        fake_galaxy.invocation_states = ["failed" if first else "scheduled"]
 
     fake_galaxy.on_invoke = first_fails
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
@@ -1563,7 +1623,7 @@ async def test_workflow_fails_without_output(
 
 @pytest.mark.asyncio
 async def test_workflow_fails_when_galaxy_fails(actions_fs, galaxy_config):
-    galaxy_config.job_states = ["error"]
+    galaxy_config.invocation_states = ["failed"]
 
     with pytest.raises(WorkflowFailureError) as error:
         await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}")
@@ -1578,6 +1638,41 @@ async def test_workflow_fails_when_galaxy_fails(actions_fs, galaxy_config):
         "**Run failed** in step `galaxy`"
         in (report_path.parent / REPORT_MARKDOWN_FILE).read_text()
     )
+
+
+@pytest.mark.asyncio
+async def test_workflow_uses_the_report_of_a_partial_run(
+    actions_fs, nomad_config, fake_galaxy
+):
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
+
+    _real_galaxy(fake_galaxy)
+    fake_galaxy.job_states = [{"ok": 5, "error": 1, "paused": 2}]
+
+    result = await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    assert result["nomad"]["created"] == [RECORD]
+    with StateStore(_state(actions_fs)) as store:
+        assert store.known_sha256(CID) == ["sha-a"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_fails_when_a_partial_run_has_no_report(
+    actions_fs, nomad_config, fake_galaxy
+):
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
+
+    _real_galaxy(fake_galaxy)
+    fake_galaxy.job_states = [{"ok": 2, "error": 1, "paused": 3}]
+    fake_galaxy.dataset_states = {"out-2": "paused"}  # `report` never ran
+
+    with pytest.raises(WorkflowFailureError) as error:
+        await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    assert "failed or paused jobs and without a report" in str(error.value.cause)
+    assert ("GET", "/api/datasets/out-1/display") not in fake_galaxy.requests
+    with StateStore(_state(actions_fs)) as store:
+        assert store.known_sha256(CID) == []  # handled again by the next run
 
 
 @pytest.mark.asyncio

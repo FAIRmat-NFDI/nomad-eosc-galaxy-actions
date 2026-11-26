@@ -379,10 +379,18 @@ class ZenodoHarvestWorkflow:
             raise ApplicationError(
                 f"Timed out waiting for Galaxy invocation {started.invocation_id}"
             )
-        if polled.state != "ok":
+        if polled.state not in ("ok", "partial"):
             raise ApplicationError(
                 f"Galaxy invocation {started.invocation_id} ended in state "
                 f"{polled.state!r}; see history {started.history_id}"
+            )
+        if polled.state == "partial" and not (
+            {GALAXY_MANIFEST_OUTPUT, GALAXY_RESULTS_OUTPUT} <= polled.outputs.keys()
+        ):
+            # The state stays unchanged, so the next run handles these files again.
+            raise ApplicationError(
+                f"Galaxy invocation {started.invocation_id} ended with failed or "
+                f"paused jobs and without a report; see history {started.history_id}"
             )
         if GALAXY_MANIFEST_OUTPUT not in polled.outputs:
             raise ApplicationError(
