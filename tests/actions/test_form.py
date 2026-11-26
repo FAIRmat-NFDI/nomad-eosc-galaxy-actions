@@ -10,17 +10,14 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
-    apply_overrides,
-    recipients,
-)
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import apply_overrides
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     DEFAULT_HARVEST_CONFIG,
-    DEFAULT_LLM_MODEL,
     HarvestConfigError,
     load_harvest_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
+    FORM_CONFIG,
     ZENODO_QUERY_EXAMPLES,
     BuildWorkListInput,
     ConfigOverrides,
@@ -34,15 +31,73 @@ def _form(**values) -> ZenodoHarvestWorkflowInput:
     return ZenodoHarvestWorkflowInput(user_id="u1", **values)
 
 
-def test_defaults_leave_every_setting_to_the_config():
+def test_form_defaults_are_the_installation_config():
+    properties = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
+
+    for name in ConfigOverrides.model_fields:
+        expected = getattr(FORM_CONFIG, name) or None  # "" is shown empty
+        assert properties[name].get("default") == expected, name
+    # No entry point is loaded when the tests import the models: the shipped config.
+    assert FORM_CONFIG == load_harvest_config(DEFAULT_HARVEST_CONFIG)
+
+
+def test_form_defaults_without_a_config_value():
     form = _form()
-    assert set(form.config_overrides()) == set(ConfigOverrides.model_fields)
-    # Only the LLM model is prefilled, so the form shows the tested one.
-    expected = dict.fromkeys(ConfigOverrides.model_fields) | {
-        "llm_model": DEFAULT_LLM_MODEL
+    expected = (1, 1, 7, 1)
+    assert (
+        form.max_records,
+        form.records_per_work_list,
+        form.repeat_every_days,
+        form.max_runs,
+    ) == expected
+
+
+def test_form_values_reach_the_run_as_shown():
+    form = _form()
+    expected = {
+        name: getattr(FORM_CONFIG, name) or None
+        for name in ConfigOverrides.model_fields
     }
     assert form.config_overrides() == expected
-    assert form.notify_email is None
+
+
+def test_a_restarted_run_keeps_the_values():
+    # A restart sends the previous run's input again, as JSON.
+    form = _form(zenodo_query="AFM", max_records=3)
+
+    restarted = ZenodoHarvestWorkflowInput.model_validate_json(form.model_dump_json())
+
+    assert restarted == form
+    assert restarted.config_overrides()["zenodo_query"] == "AFM"
+
+
+def test_default_lists_are_not_shared():
+    _form().raw_extensions.append(".xyz")
+    assert _form().raw_extensions == FORM_CONFIG.raw_extensions
+    assert ".xyz" not in FORM_CONFIG.raw_extensions
+
+
+def test_empty_secrets_are_not_saved_as_null():
+    from nomad.actions.serialization import _to_dict  # noqa: PLC0415
+
+    form = _form(galaxy_api_key="key")
+
+    assert form.zenodo_token is None
+    # NOMAD saves the input for a rerun; neither key is in it.
+    saved = _to_dict(form)
+    assert not {"galaxy_api_key", "zenodo_token"} & set(saved)
+    assert ZenodoHarvestWorkflowInput.model_validate(saved).zenodo_token is None
+    # Temporal gets the given key, and no null for the empty one.
+    sent = json.loads(form.model_dump_json())
+    assert sent["galaxy_api_key"] == "key"
+    assert "zenodo_token" not in sent
+
+
+def test_notify_email_is_gone():
+    properties = ZenodoHarvestWorkflowInput.model_json_schema()["properties"]
+    assert "notify_email" not in properties
+    # Input saved by an older version still loads; the value is dropped.
+    assert not hasattr(_form(notify_email="name@example.org"), "notify_email")
 
 
 def test_backend_settings_are_not_in_the_form():
@@ -60,7 +115,7 @@ def test_schema_shows_the_new_fields_and_short_descriptions():
     for name in ("raw_extensions", "context_extensions", "ignore_patterns", "licenses"):
         array = properties[name]["anyOf"][0]
         assert array == {"type": "array", "items": {"type": "string"}}, name
-    assert {"galaxy_workflow_id", "notify_email"} <= set(properties)
+    assert "galaxy_workflow_id" in properties
     assert "run_number" not in properties
     for name, field in properties.items():
         if name == "user_id":
@@ -132,6 +187,11 @@ def test_own_galaxy_url_needs_own_key(key):
         _form(galaxy_url="https://usegalaxy.org", galaxy_api_key=key)
 
 
+@pytest.mark.parametrize("url", [FORM_CONFIG.galaxy_url, "https://usegalaxy.eu/"])
+def test_default_galaxy_url_needs_no_key(url):
+    assert _form(galaxy_url=url).galaxy_url == FORM_CONFIG.galaxy_url
+
+
 def test_own_galaxy_url_with_own_key():
     form = _form(galaxy_url="https://usegalaxy.org", galaxy_api_key="key")
     assert form.galaxy_url == "https://usegalaxy.org"
@@ -143,12 +203,8 @@ def test_negative_delay_is_refused():
 
 
 def test_empty_text_fields_mean_not_set():
-    form = _form(galaxy_workflow_id="  ", zenodo_query=" ", notify_email="")
-    assert (form.galaxy_workflow_id, form.zenodo_query, form.notify_email) == (
-        None,
-        None,
-        None,
-    )
+    form = _form(galaxy_workflow_id="  ", zenodo_query=" ")
+    assert (form.galaxy_workflow_id, form.zenodo_query) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -201,16 +257,6 @@ def test_record_ids_must_be_numbers(given):
 
 def test_workflow_id_is_trimmed():
     assert _form(galaxy_workflow_id=" abc ").galaxy_workflow_id == "abc"
-
-
-@pytest.mark.parametrize("address", ["no-at-sign", "a@b", "a b@c.org", "@c.org"])
-def test_bad_email_is_refused(address):
-    with pytest.raises(ValidationError):
-        _form(notify_email=address)
-
-
-def test_good_email_is_kept():
-    assert _form(notify_email="name@example.org").notify_email == "name@example.org"
 
 
 def test_overrides_reach_the_activity_inputs():
@@ -305,25 +351,31 @@ def test_backend_settings_keep_the_config():
         assert getattr(config, name) == getattr(_config(), name)
 
 
+def _installation_config():
+    """An installation's own harvest config, different from the shipped one."""
+    return _config().model_copy(
+        update={
+            "zenodo_url": "https://sandbox.zenodo.org",
+            "galaxy_url": "https://usegalaxy.org",
+            "galaxy_workflow_id": "wf-installation",
+            "licenses": ["cc-zero"],
+            "llm_model": "gemma-4-31b-llmlb-freiburg",
+            "zenodo_request_delay": 3.0,
+        }
+    )
+
+
+def test_form_values_replace_the_installation_config():
+    data = _overrides(zenodo_query="AFM", licenses=["cc-zero"])
+
+    config = apply_overrides(_installation_config(), data)
+
+    assert config.zenodo_query == "AFM"
+    assert config.galaxy_url == FORM_CONFIG.galaxy_url  # the form's value wins
+
+
 def test_empty_form_values_keep_the_config():
     data = BuildWorkListInput(run_dir="r", user_id="u1", run_id="run-1")
 
     assert apply_overrides(_config(), data) == _config()
     assert apply_overrides(_config(), None) == _config()
-
-
-# recipients
-
-
-@pytest.mark.parametrize(
-    ("user", "extra", "expected"),
-    [
-        ("u@x.org", None, "u@x.org"),
-        ("u@x.org", "e@y.org", "u@x.org, e@y.org"),
-        ("u@x.org", "u@x.org", "u@x.org"),  # no repeat
-        (None, "e@y.org", "e@y.org"),  # the user has no address
-        (None, None, ""),
-    ],
-)
-def test_recipients(user, extra, expected):
-    assert recipients(user, extra) == expected

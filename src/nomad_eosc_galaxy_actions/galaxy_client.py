@@ -25,15 +25,23 @@ from bioblend.galaxy import GalaxyInstance
 
 GALAXY_URL = "https://usegalaxy.eu"
 
-_TERMINAL_ERROR_JOB_STATES = {
-    "error",
-    "failed",
-    "deleted",
+# Job states that can still change, as in Planemo's `NON_TERMINAL_JOB_STATES`.
+# `paused` is not one: a paused job waits for a user and never starts by itself.
+_ACTIVE_JOB_STATES = {
+    "new",
+    "ready",
+    "resubmitted",
+    "upload",
+    "waiting",
+    "queued",
+    "running",
     "deleting",
-    "stopped",
     "stopping",
-    "paused",
 }
+_SUCCESS_JOB_STATES = {"ok", "skipped"}
+# `completed` (Galaxy 26.1+): every job has ended. Older Galaxy stops at `scheduled`.
+_ENDED_INVOCATION_STATES = {"scheduled", "completed"}
+_FAILED_INVOCATION_STATES = {"failed", "cancelled"}
 
 
 def get_instance(api_key: str, galaxy_url: str = GALAXY_URL) -> GalaxyInstance:
@@ -49,6 +57,7 @@ def upload_and_invoke(  # noqa: PLR0913
     workflow_input_step: str = "0",
     tool_params: dict[str, dict[str, Any]] | None = None,
     parameter_inputs: dict[str, Any] | None = None,
+    inputs_by: str = "step_index",
     history_name: str | None = None,
     galaxy_url: str = GALAXY_URL,
 ) -> dict[str, str]:
@@ -61,12 +70,14 @@ def upload_and_invoke(  # noqa: PLR0913
             auto-detection ('auto') — pass the specific datatype explicitly
             when auto-detection can't be relied on (see the design doc's note
             on the `nxxps` sniffer bug for why XPS callers should).
-        workflow_input_step: step index of the workflow's data-input step.
+        workflow_input_step: the workflow's data-input step, as `inputs_by` says.
         tool_params: `{step_index: {param_name: value, ...}, ...}`, forwarded
             to `invoke_workflow`'s `params` as-is — shape depends entirely on
             the target tool(s)' own parameters.
-        parameter_inputs: `{step_index: value}` for the workflow's parameter
+        parameter_inputs: `{step: value}` for the workflow's parameter
             inputs (text, boolean, ...); unset ones keep their default.
+        inputs_by: how Galaxy finds the input steps: `step_index`, or `name`
+            for the step labels, which stay when the workflow is edited.
         history_name: defaults to the uploaded file's stem if not given.
 
     Returns:
@@ -93,7 +104,7 @@ def upload_and_invoke(  # noqa: PLR0913
         },
         params=tool_params,
         history_id=history["id"],
-        inputs_by="step_index",
+        inputs_by=inputs_by,
     )
     return {"history_id": history["id"], "invocation_id": invocation["id"]}
 
@@ -104,40 +115,59 @@ def poll_invocation(
     """Check an invocation's status once (no sleeping; that's the caller's job).
 
     Returns {"done": bool, "state": str, "outputs": dict[str, str] | None}.
-    outputs maps output names to Galaxy dataset IDs. It is populated only
-    when the invocation is complete and all jobs succeeded.
+    The run is done when Galaxy has created all jobs and none can still
+    change (see `_ACTIVE_JOB_STATES`). `state` is then:
 
-    Outputs are collected from two sources and merged:
+    * `ok`: every job ended `ok` or `skipped`.
+    * `partial`: some jobs failed or are paused. Only outputs whose
+      datasets are `ok` are returned, so a step that never ran has none.
+    * `error`: the invocation itself failed or was cancelled; no outputs.
 
-    * Each job's own outputs, keyed by the tool's output parameter names.
-    * invocation["outputs"], keyed by labels declared as workflow outputs
-    via workflow_outputs in the .ga file. These override job outputs
-    with the same name. Labelled collection outputs (invocation
-    ["output_collections"]) are added the same way, with collection IDs.
+    outputs maps output names to Galaxy dataset IDs. They come from each
+    single-job step's outputs (keyed by the tool's output names), overridden by
+    the workflow's labelled outputs (`invocation["outputs"]`, and
+    `invocation["output_collections"]` with collection IDs).
     """
     gi = get_instance(api_key, galaxy_url)
     invocation = gi.invocations.show_invocation(invocation_id)
-
-    job_ids = [step["job_id"] for step in invocation["steps"] if step.get("job_id")]
-    if not job_ids:
+    if invocation["state"] in _FAILED_INVOCATION_STATES:
+        return {"done": True, "state": "error", "outputs": None}
+    if invocation["state"] not in _ENDED_INVOCATION_STATES:  # still scheduling
         return {"done": False, "state": invocation["state"], "outputs": None}
 
-    jobs = [gi.jobs.show_job(job_id) for job_id in job_ids]
-    states = {job["state"] for job in jobs}
-
-    if states & _TERMINAL_ERROR_JOB_STATES:
-        return {"done": True, "state": "error", "outputs": None}
-    if states != {"ok"}:
+    # The job summary counts all jobs, also those of mapped steps (no `job_id`).
+    states = set(gi.invocations.get_invocation_summary(invocation_id)["states"])
+    if invocation["state"] == "scheduled" and (
+        not states or states & _ACTIVE_JOB_STATES
+    ):
         return {"done": False, "state": "running", "outputs": None}
 
     outputs: dict[str, str] = {}
-    for job in jobs:
-        outputs.update({name: ref["id"] for name, ref in job["outputs"].items()})
-    for key in ("outputs", "output_collections"):
-        outputs.update(
-            {name: ref["id"] for name, ref in invocation.get(key, {}).items()}
-        )
-    return {"done": True, "state": "ok", "outputs": outputs}
+    for step in invocation["steps"]:
+        if step.get("job_id"):
+            job = gi.jobs.show_job(step["job_id"])
+            outputs.update({name: ref["id"] for name, ref in job["outputs"].items()})
+    outputs.update(
+        {name: ref["id"] for name, ref in invocation.get("outputs", {}).items()}
+    )
+    collections = {
+        name: ref["id"]
+        for name, ref in invocation.get("output_collections", {}).items()
+    }
+    if states <= _SUCCESS_JOB_STATES:
+        return {"done": True, "state": "ok", "outputs": outputs | collections}
+
+    # Galaxy creates the outputs of paused steps too, so keep only finished ones.
+    outputs = {
+        name: dataset_id
+        for name, dataset_id in outputs.items()
+        if gi.datasets.show_dataset(dataset_id)["state"] == "ok"
+    }
+    for name, collection_id in collections.items():
+        collection = gi.dataset_collections.show_dataset_collection(collection_id)
+        if collection.get("populated_state") == "ok":
+            outputs[name] = collection_id
+    return {"done": True, "state": "partial", "outputs": outputs}
 
 
 def collection_elements(

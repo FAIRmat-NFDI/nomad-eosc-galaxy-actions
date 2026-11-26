@@ -116,8 +116,11 @@ class FakeGalaxy(ThreadingHTTPServer):
     the outputs per work list; `work_lists` keeps them all. Add a `results` entry to
     `invocation_outputs` to serve `results`. `collections` maps collection IDs
     to {element identifier: content}, served as datasets `<collection>-<identifier>`;
-    label them in `invocation_collections`. `job_states` lists the job state
-    for each poll; the last one repeats.
+    label them in `invocation_collections`.
+
+    Per poll (the last entry repeats): `invocation_states` gives the invocation
+    state, and `job_states` the job summary, as one state or {state: count}.
+    `dataset_states` and `collection_states` override the `ok` of an ID.
     """
 
     def __init__(self):
@@ -127,7 +130,10 @@ class FakeGalaxy(ThreadingHTTPServer):
         self.results = b""
         self.collections: dict[str, dict[str, bytes]] = {}
         self.invocation_collections: dict[str, dict] = {}
-        self.job_states = ["ok"]
+        self.invocation_states = ["scheduled"]
+        self.job_states: list[str | dict[str, int]] = ["ok"]
+        self.dataset_states: dict[str, str] = {}
+        self.collection_states: dict[str, str] = {}
         self.invocation_outputs = {"manifest": {"id": "out-1", "src": "hda"}}
         self.requests: list[tuple[str, str]] = []
         self.api_keys: set[str | None] = set()  # x-api-key headers received
@@ -187,11 +193,16 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "id": "inv-1",
+                    "state": _next(server.invocation_states),
                     "steps": steps,
                     "outputs": server.invocation_outputs,
                     "output_collections": server.invocation_collections,
                 },
             )
+        elif path == "/api/invocations/inv-1/jobs_summary":
+            states = _next(server.job_states)
+            states = states if isinstance(states, dict) else {states: 1}
+            self._send(200, {"id": "inv-1", "states": states})
         elif path.startswith("/api/dataset_collections/"):
             collection_id = path.rsplit("/", 1)[1]
             elements = [
@@ -201,19 +212,23 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
                 }
                 for name in server.collections.get(collection_id, {})
             ]
-            self._send(200, {"id": collection_id, "elements": elements})
-        elif path == "/api/jobs/job-1":
-            state = (
-                server.job_states.pop(0)
-                if len(server.job_states) > 1
-                else server.job_states[0]
+            self._send(
+                200,
+                {
+                    "id": collection_id,
+                    "populated_state": server.collection_states.get(
+                        collection_id, "ok"
+                    ),
+                    "elements": elements,
+                },
             )
-            self._send(200, {"state": state, "outputs": {"out_file1": {"id": "out-1"}}})
+        elif path == "/api/jobs/job-1":
+            self._send(200, {"state": "ok", "outputs": {"out_file1": {"id": "out-1"}}})
         elif path in ("/api/datasets/out-1", "/api/datasets/out-2"):
             self._send(
                 200,
                 {
-                    "state": "ok",
+                    "state": server.dataset_states.get(path.rsplit("/", 1)[1], "ok"),
                     "file_ext": "json",
                     "download_url": f"{path}/display",
                 },
@@ -262,6 +277,11 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):  # keep test output quiet
         pass
+
+
+def _next(values: list):
+    """The first value; it is removed unless it is the last one."""
+    return values.pop(0) if len(values) > 1 else values[0]
 
 
 @pytest.fixture

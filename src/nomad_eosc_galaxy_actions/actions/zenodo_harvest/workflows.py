@@ -73,7 +73,8 @@ class ZenodoHarvestWorkflow:
         # workflow.now(), not datetime.now(): workflow code must be
         # deterministic, so time comes from Temporal's replayable clock.
         started = workflow.now()
-        if not data.repeat_every_days:
+        # max_runs 1 (the form's default) is one run, like no repeat at all.
+        if not data.repeat_every_days or data.max_runs == 1:
             return await self._harvest(data, workflow.info().workflow_id, None)
 
         number = data.run_number
@@ -378,10 +379,18 @@ class ZenodoHarvestWorkflow:
             raise ApplicationError(
                 f"Timed out waiting for Galaxy invocation {started.invocation_id}"
             )
-        if polled.state != "ok":
+        if polled.state not in ("ok", "partial"):
             raise ApplicationError(
                 f"Galaxy invocation {started.invocation_id} ended in state "
                 f"{polled.state!r}; see history {started.history_id}"
+            )
+        if polled.state == "partial" and not (
+            {GALAXY_MANIFEST_OUTPUT, GALAXY_RESULTS_OUTPUT} <= polled.outputs.keys()
+        ):
+            # The state stays unchanged, so the next run handles these files again.
+            raise ApplicationError(
+                f"Galaxy invocation {started.invocation_id} ended with failed or "
+                f"paused jobs and without a report; see history {started.history_id}"
             )
         if GALAXY_MANIFEST_OUTPUT not in polled.outputs:
             raise ApplicationError(
@@ -509,7 +518,6 @@ class ZenodoHarvestWorkflow:
                     report_path=written.report_path,
                     markdown_path=written.markdown_path,
                     user_id=data.user_id,
-                    notify_email=data.notify_email,
                 ),
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=retry_policy,

@@ -18,6 +18,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     upgrade,
     upgrade_content,
 )
+from nomad_eosc_galaxy_actions.actions.zenodo_harvest.zenodo_client import has_extension
 
 
 @pytest.fixture
@@ -69,13 +70,10 @@ def test_load_rejects_invalid_settings(tmp_path, shipped, change, message):
         load_harvest_config(path)
 
 
-def test_load_rejects_missing_setting(tmp_path, shipped):
+def test_missing_setting_keeps_the_shipped_value(tmp_path, shipped):
     del shipped["zenodo_query"]
     path = _write(tmp_path, shipped)
-    with pytest.raises(
-        HarvestConfigError, match=f"^{re.escape(str(path))}: zenodo_query: Field"
-    ):
-        load_harvest_config(path)
+    assert load_harvest_config(path).zenodo_query == load_harvest_config().zenodo_query
 
 
 @pytest.mark.parametrize(
@@ -206,3 +204,28 @@ def test_old_version_with_a_newer_setting_is_refused(tmp_path, shipped):
 def test_upgrade_missing_step():
     with pytest.raises(HarvestConfigError, match="no upgrade from schema_version 1"):
         upgrade_content({"schema_version": 1}, current=2, upgrades={})
+
+
+# File names from pynxtools-spm's tests/data, one per reader format.
+@pytest.mark.parametrize(
+    "name",
+    [
+        "STM_WTip_WSe2-SL445_055.sxm",
+        "STS_nanonis_generic_5e_1.dat",
+        "VT220120_A2_0001.sm4",
+        "Figure_6c.SM4",
+        "tecky.0_00002.spm",
+        "SB04-MG1.0_00000.spm.txt",
+        "B3320_13_061726074638.SIG_TOPO_FRW.FLT",
+    ],
+)
+def test_shipped_raw_extensions_cover_the_spm_reader(name):
+    assert has_extension(name, load_harvest_config().raw_extensions)
+
+
+@pytest.mark.parametrize("name", ["readme.txt", "notes.TXT", "data.json"])
+def test_shipped_raw_extensions_leave_text_files_as_context(name):
+    config = load_harvest_config()
+
+    assert not has_extension(name, config.raw_extensions)
+    assert has_extension(name, config.context_extensions)

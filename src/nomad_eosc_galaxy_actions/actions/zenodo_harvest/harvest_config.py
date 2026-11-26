@@ -6,8 +6,9 @@
 """Harvest configuration: what to harvest and where to convert it.
 
 The settings ship with the Action in `config/harvest_config.json`. A NOMAD
-installation can use its own file instead (entry point `harvest_config_path`).
-Every file carries a `schema_version`, and older versions are upgraded on load.
+installation can change some of them with its own file (entry point
+`harvest_config_path`): only the keys in that file replace the shipped ones.
+The shipped file carries a `schema_version`; older versions are upgraded on load.
 """
 
 import json
@@ -21,6 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 # values. When the layout changes: bump it and add an upgrade to UPGRADES.
 HARVEST_CONFIG_SCHEMA_VERSION = 4
 DEFAULT_HARVEST_CONFIG = Path(__file__).parent / "config" / "harvest_config.json"
+ZENODO_HARVEST_ACTION = (
+    "nomad_eosc_galaxy_actions.actions.zenodo_harvest:zenodo_harvest_action"
+)
 # A multimodal model of LLM Hub on usegalaxy.eu: it gave the best ELN in a comparison
 # (2026-11-12).
 DEFAULT_LLM_MODEL = "mistral-medium-3.5-e-infra.cz"
@@ -86,8 +90,8 @@ class HarvestConfig(BaseModel):
             "per minute (https://developers.zenodo.org/#rate-limiting)."
         ),
     )
-    # TODO: Add all the file extensions once we test for .sxm files in the
-    # development workflow.
+    # The pynxtools-spm reader's formats; Bruker text exports as `.spm.txt`, so a
+    # readme `.txt` stays context (raw is matched first).
     raw_extensions: list[str] = Field(
         description="File extensions converted to NeXus (role 'raw')."
     )
@@ -200,24 +204,64 @@ def upgrade(content: dict[str, Any]) -> HarvestConfig:
         raise HarvestConfigError(problems) from error
 
 
-def load_harvest_config(path: str | Path | None = None) -> HarvestConfig:
-    """Read, upgrade and validate a harvest config file.
-
-    Args:
-        path: config file; the one shipped with the Action if None.
-
-    Raises:
-        FileNotFoundError: the file does not exist.
-        HarvestConfigError: the file is not valid JSON or not a valid config;
-            the message starts with the file path.
-    """
-    path = Path(path or DEFAULT_HARVEST_CONFIG)
+def _read_object(path: Path) -> dict[str, Any]:
+    """The JSON object in a config file."""
     try:
         content = json.loads(path.read_text("utf-8"))
-        if not isinstance(content, dict):
-            raise HarvestConfigError("must hold a JSON object")
-        return upgrade(content)
     except json.JSONDecodeError as error:
-        raise HarvestConfigError(f"{path}: not valid JSON ({error})") from error
+        raise HarvestConfigError(f"not valid JSON ({error})") from error
+    if not isinstance(content, dict):
+        raise HarvestConfigError("must hold a JSON object")
+    return content
+
+
+def overlay_settings(content: dict[str, Any]) -> dict[str, Any]:
+    """The settings of an installation file, without `schema_version`.
+
+    A file with an older `schema_version` is upgraded first, but only its own
+    keys are kept: settings an upgrade adds must not reset the shipped values.
+    """
+    keys = set(content) - {"schema_version"}
+    if "schema_version" in content:
+        content = upgrade_content(content)
+    return {key: content[key] for key in keys}
+
+
+def load_harvest_config(path: str | Path | None = None) -> HarvestConfig:
+    """The shipped harvest config, with the settings of `path` in place of its own.
+
+    Args:
+        path: an installation file that may hold only some settings; None or
+            empty gives the shipped config. A list in it replaces the shipped list.
+
+    Raises:
+        FileNotFoundError: a file does not exist.
+        HarvestConfigError: a file is not valid JSON or gives a bad or unknown
+            setting; the message starts with the file path.
+    """
+    shipped_path = Path(DEFAULT_HARVEST_CONFIG)
+    try:
+        shipped = upgrade(_read_object(shipped_path))
+    except HarvestConfigError as error:
+        raise HarvestConfigError(f"{shipped_path}: {error}") from error
+    if not path or Path(path).resolve() == shipped_path.resolve():
+        return shipped
+    path = Path(path)
+    try:
+        settings = overlay_settings(_read_object(path))
+        return upgrade(shipped.model_dump() | settings)
     except HarvestConfigError as error:
         raise HarvestConfigError(f"{path}: {error}") from error
+
+
+def installation_config() -> HarvestConfig:
+    """This installation's harvest config: the entry point's file over the shipped one.
+
+    Before NOMAD loads its plugins (scripts, some tests), the shipped config.
+    """
+    from nomad.config import config  # noqa: PLC0415
+
+    if config.plugins is None:
+        return load_harvest_config()
+    entry_point = config.get_plugin_entry_point(ZENODO_HARVEST_ACTION)
+    return load_harvest_config(entry_point.harvest_config_path)

@@ -44,7 +44,6 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     STATE_FILE,
     STATE_PROJECT,
     WORK_LIST_FILE,
-    ZENODO_HARVEST_ACTION,
     build_work_list,
     create_projects,
     email_report,
@@ -65,10 +64,13 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
     DEFAULT_HARVEST_CONFIG,
+    ZENODO_HARVEST_ACTION,
     HarvestConfig,
+    installation_config,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.models import (
     BuildWorkListInput,
+    ConfigOverrides,
     CreateProjectsInput,
     EmailReportInput,
     FetchManifestInput,
@@ -316,6 +318,15 @@ ALL_ACTIVITIES = [
 ]
 
 
+def _workflow_input(**inputs) -> ZenodoHarvestWorkflowInput:
+    """The form as NOMAD shows it for the test installation, with `inputs` changed."""
+    config = installation_config()
+    shown = {
+        name: getattr(config, name) or None for name in ConfigOverrides.model_fields
+    }
+    return ZenodoHarvestWorkflowInput(user_id="u1", **(shown | inputs))
+
+
 async def _run_workflow(
     workflow_id: str, max_records: int | None = 2, dry_run: bool = True, **inputs
 ) -> dict:
@@ -334,9 +345,7 @@ async def _run_workflow(
         ):
             return await env.client.execute_workflow(
                 ZenodoHarvestWorkflow.run,
-                ZenodoHarvestWorkflowInput(
-                    user_id="u1", max_records=max_records, dry_run=dry_run, **inputs
-                ),
+                _workflow_input(max_records=max_records, dry_run=dry_run, **inputs),
                 id=workflow_id,
                 task_queue=task_queue,
             )
@@ -387,6 +396,11 @@ def test_worker_token_is_not_sent_to_the_form_zenodo(
     tmp_path, fake_zenodo, harvest_config_file, monkeypatch
 ):
     monkeypatch.setenv("ZENODO_TOKEN", "worker-token")
+    # The config names another Zenodo; the form's one gets no worker token.
+    content = json.loads(harvest_config_file.read_text())
+    harvest_config_file.write_text(
+        json.dumps(content | {"zenodo_url": "https://zenodo.org"})
+    )
 
     ActivityEnvironment().run(
         search_zenodo,
@@ -597,11 +611,12 @@ def test_run_galaxy_activity(tmp_path, galaxy_config):
     assert galaxy_config.uploaded == path.read_bytes()
     assert galaxy_config.history_payload["name"] == "zenodo-harvest-run-1"
     payload = galaxy_config.invocation_payload
-    # Work list, LLM on (default) and the config's model.
+    # Work list, LLM on (default) and the config's model, by label.
+    assert payload["inputs_by"] == "name"
     assert payload["inputs"] == {
-        "0": {"src": "hda", "id": "in-1"},
-        "2": True,
-        "3": "mistral-medium-3.5-e-infra.cz",
+        "work list": {"src": "hda", "id": "in-1"},
+        "use llm": True,
+        "llm model": "mistral-medium-3.5-e-infra.cz",
     }
     assert result.llm == "mistral-medium-3.5-e-infra.cz"
     assert ("POST", "/api/workflows/wf-1/invocations") in galaxy_config.requests
@@ -617,15 +632,17 @@ def _run_galaxy_llm(**form) -> tuple:
 
 
 def _parameter_inputs(galaxy) -> dict:
-    return {k: v for k, v in galaxy.invocation_payload["inputs"].items() if k != "0"}
+    return {
+        k: v for k, v in galaxy.invocation_payload["inputs"].items() if k != "work list"
+    }
 
 
 def test_llm_model_from_the_form(tmp_path, galaxy_config):
     _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="gemma-3-27b-llmlb-freiburg")
 
     assert _parameter_inputs(galaxy_config) == {
-        "2": True,
-        "3": "gemma-3-27b-llmlb-freiburg",
+        "use llm": True,
+        "llm model": "gemma-3-27b-llmlb-freiburg",
     }
     assert llm == "gemma-3-27b-llmlb-freiburg"
 
@@ -633,7 +650,7 @@ def test_llm_model_from_the_form(tmp_path, galaxy_config):
 def test_llm_off_in_the_form(tmp_path, galaxy_config):
     _, llm = _run_galaxy_llm(run_dir=tmp_path, use_llm=False)
 
-    assert _parameter_inputs(galaxy_config) == {"2": False}
+    assert _parameter_inputs(galaxy_config) == {"use llm": False}
     assert llm == "off (form)"
 
 
@@ -643,7 +660,10 @@ def test_empty_form_model_uses_the_config(tmp_path, galaxy_config, harvest_confi
 
     _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="")
 
-    assert _parameter_inputs(galaxy_config) == {"2": True, "3": "config-model"}
+    assert _parameter_inputs(galaxy_config) == {
+        "use llm": True,
+        "llm model": "config-model",
+    }
     assert llm == "config-model"
 
 
@@ -651,7 +671,10 @@ def test_model_is_sent_without_a_check(tmp_path, galaxy_config):
     # The Action does not ask Galaxy for its models; LLM Hub falls back itself.
     _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="no-such-model")
 
-    assert _parameter_inputs(galaxy_config) == {"2": True, "3": "no-such-model"}
+    assert _parameter_inputs(galaxy_config) == {
+        "use llm": True,
+        "llm model": "no-such-model",
+    }
     assert llm == "no-such-model"
     assert not [r for r in galaxy_config.requests if r[1].endswith("/build")]
 
@@ -668,8 +691,15 @@ def test_galaxy_needs_api_key(tmp_path, galaxy_config, monkeypatch):
     assert galaxy_config.requests == []
 
 
-def test_worker_key_is_not_sent_to_the_form_galaxy(tmp_path, galaxy_config):
+def test_worker_key_is_not_sent_to_the_form_galaxy(
+    tmp_path, galaxy_config, harvest_config_file
+):
     path = _work_list(tmp_path)
+    # The config names another Galaxy; the form's one gets no worker key.
+    content = json.loads(harvest_config_file.read_text())
+    harvest_config_file.write_text(
+        json.dumps(content | {"galaxy_url": "https://usegalaxy.eu"})
+    )
 
     with pytest.raises(ApplicationError, match="only sent to the harvest config"):
         ActivityEnvironment().run(
@@ -697,14 +727,28 @@ def test_galaxy_key_from_the_form_wins(tmp_path, galaxy_config):
 @pytest.mark.parametrize(
     "case",
     [
-        (["running"], False, "running", None),
-        (["ok"], True, "ok", "out-1"),
-        (["error"], True, "error", None),
+        # The bug: the known jobs are `ok`, but Galaxy is still making jobs.
+        ("ready", "ok", False, "ready", None),
+        ("new", "ok", False, "new", None),
+        ("scheduled", "running", False, "running", None),
+        ("scheduled", {"ok": 2, "queued": 25}, False, "running", None),
+        ("scheduled", {}, False, "running", None),
+        ("scheduled", "ok", True, "ok", "out-1"),
+        ("scheduled", {"ok": 3, "skipped": 1}, True, "ok", "out-1"),
+        ("completed", "ok", True, "ok", "out-1"),
+        ("completed", {}, True, "ok", "out-1"),
+        # Failed and paused jobs end the run too.
+        ("scheduled", {"ok": 2, "error": 1, "paused": 4}, True, "partial", "out-1"),
+        ("completed", "paused", True, "partial", "out-1"),
+        ("failed", "ok", True, "error", None),
+        ("cancelled", "running", True, "error", None),
+        ("cancelling", "running", False, "cancelling", None),
     ],
 )
 def test_poll_galaxy_activity(galaxy_config, case):
-    job_states, done, state, manifest_id = case
-    galaxy_config.job_states = job_states
+    invocation_state, job_states, done, state, manifest_id = case
+    galaxy_config.invocation_states = [invocation_state]
+    galaxy_config.job_states = [job_states]
 
     result = ActivityEnvironment().run(
         poll_galaxy, PollGalaxyInput(invocation_id="inv-1")
@@ -712,6 +756,50 @@ def test_poll_galaxy_activity(galaxy_config, case):
 
     assert (result.done, result.state) == (done, state)
     assert (result.outputs or {}).get("manifest") == manifest_id
+
+
+def test_poll_galaxy_waits_until_all_jobs_exist(galaxy_config):
+    galaxy_config.invocation_states = ["ready", "scheduled", "scheduled"]
+    galaxy_config.job_states = [{"ok": 2, "running": 26}, {"ok": 28}]
+
+    polls = [
+        ActivityEnvironment().run(poll_galaxy, PollGalaxyInput(invocation_id="inv-1"))
+        for _ in range(3)
+    ]
+
+    assert [(p.done, p.state) for p in polls] == [
+        (False, "ready"),
+        (False, "running"),
+        (True, "ok"),
+    ]
+
+
+def test_poll_galaxy_keeps_only_finished_outputs(galaxy_config):
+    """Galaxy makes the outputs of a paused step; they are left out."""
+    galaxy_config.job_states = [{"ok": 2, "error": 1, "paused": 1}]
+    galaxy_config.invocation_outputs |= {"results": {"id": "out-2", "src": "hda"}}
+    galaxy_config.invocation_collections = {"projects": {"id": "coll-1"}}
+    galaxy_config.dataset_states = {"out-2": "paused"}
+    galaxy_config.collection_states = {"coll-1": "new"}
+
+    result = ActivityEnvironment().run(
+        poll_galaxy, PollGalaxyInput(invocation_id="inv-1")
+    )
+
+    assert (result.done, result.state) == (True, "partial")
+    assert result.outputs == {"manifest": "out-1", "out_file1": "out-1"}
+
+
+def test_poll_galaxy_keeps_finished_collections(galaxy_config):
+    galaxy_config.job_states = [{"ok": 5, "error": 1}]
+    galaxy_config.invocation_collections = {"projects": {"id": "coll-1"}}
+
+    result = ActivityEnvironment().run(
+        poll_galaxy, PollGalaxyInput(invocation_id="inv-1")
+    )
+
+    assert result.state == "partial"
+    assert result.outputs["projects"] == "coll-1"
 
 
 def _fetch(run_dir: Path, results_dataset_id: str | None = None):
@@ -1152,7 +1240,8 @@ async def test_workflow_galaxy_round_trip(actions_fs, galaxy_config):
         manifest = json.loads(Path(batch["galaxy"]["manifest_path"]).read_text())
         sent = run_dir / batch["folder"] / WORK_LIST_FILE
         assert manifest == json.loads(sent.read_text())  # the placeholder's echo
-    polls = [r for r in galaxy_config.requests if r[1] == "/api/jobs/job-1"]
+    summary = "/api/invocations/inv-1/jobs_summary"
+    polls = [r for r in galaxy_config.requests if r[1] == summary]
     assert len(polls) == 4  # noqa: PLR2004  (3 for the first batch, 1 for the second)
     assert result["nomad"] == {"status": "skipped", "reason": "placeholder"}
     assert result["merge"] == {"status": "skipped", "reason": "placeholder"}
@@ -1452,7 +1541,8 @@ async def test_failed_batch_does_not_stop_the_others(
 
     def first_fails(work_list):
         convert(work_list)
-        fake_galaxy.job_states = ["error" if len(fake_galaxy.work_lists) == 1 else "ok"]
+        first = len(fake_galaxy.work_lists) == 1
+        fake_galaxy.invocation_states = ["failed" if first else "scheduled"]
 
     fake_galaxy.on_invoke = first_fails
     workflow_id = f"zenodo-harvest-{uuid.uuid4()}"
@@ -1542,7 +1632,7 @@ async def test_workflow_fails_without_output(
 
 @pytest.mark.asyncio
 async def test_workflow_fails_when_galaxy_fails(actions_fs, galaxy_config):
-    galaxy_config.job_states = ["error"]
+    galaxy_config.invocation_states = ["failed"]
 
     with pytest.raises(WorkflowFailureError) as error:
         await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}")
@@ -1557,6 +1647,41 @@ async def test_workflow_fails_when_galaxy_fails(actions_fs, galaxy_config):
         "**Run failed** in step `galaxy`"
         in (report_path.parent / REPORT_MARKDOWN_FILE).read_text()
     )
+
+
+@pytest.mark.asyncio
+async def test_workflow_uses_the_report_of_a_partial_run(
+    actions_fs, nomad_config, fake_galaxy
+):
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
+
+    _real_galaxy(fake_galaxy)
+    fake_galaxy.job_states = [{"ok": 5, "error": 1, "paused": 2}]
+
+    result = await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    assert result["nomad"]["created"] == [RECORD]
+    with StateStore(_state(actions_fs)) as store:
+        assert store.known_sha256(CID) == ["sha-a"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_fails_when_a_partial_run_has_no_report(
+    actions_fs, nomad_config, fake_galaxy
+):
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
+
+    _real_galaxy(fake_galaxy)
+    fake_galaxy.job_states = [{"ok": 2, "error": 1, "paused": 3}]
+    fake_galaxy.dataset_states = {"out-2": "paused"}  # `report` never ran
+
+    with pytest.raises(WorkflowFailureError) as error:
+        await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    assert "failed or paused jobs and without a report" in str(error.value.cause)
+    assert ("GET", "/api/datasets/out-1/display") not in fake_galaxy.requests
+    with StateStore(_state(actions_fs)) as store:
+        assert store.known_sha256(CID) == []  # handled again by the next run
 
 
 @pytest.mark.asyncio
@@ -1614,7 +1739,9 @@ async def test_failed_run_ends_the_repeated_runs(actions_fs, galaxy_config):
     galaxy_config.job_states = ["error"]
 
     with pytest.raises(WorkflowFailureError):
-        await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", repeat_every_days=7)
+        await _run_workflow(
+            f"zenodo-harvest-{uuid.uuid4()}", repeat_every_days=7, max_runs=None
+        )
 
     [report_path] = actions_fs.rglob(REPORT_FILE)  # no second run
     assert report_path.parent.name == "run-001"
@@ -1637,7 +1764,7 @@ async def test_stopping_ends_the_repeated_runs(actions_fs, harvest_config_file):
         ):
             handle = await env.client.start_workflow(
                 ZenodoHarvestWorkflow.run,
-                ZenodoHarvestWorkflowInput(user_id="u1", repeat_every_days=7),
+                _workflow_input(repeat_every_days=7, max_runs=None),
                 id=f"zenodo-harvest-{uuid.uuid4()}",
                 task_queue=task_queue,
             )

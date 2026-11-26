@@ -18,13 +18,16 @@ from pydantic import (
     model_validator,
 )
 from pydantic.json_schema import SkipJsonSchema
+from temporalio import workflow
 
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.harvest_config import (
-    DEFAULT_LLM_MODEL,
+    installation_config,
 )
 from nomad_eosc_galaxy_actions.credentials import reveal
 
-EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+# The form's defaults: this installation's harvest config, read once at start-up.
+# The run uses the form's values; an empty field uses the config's value.
+FORM_CONFIG = installation_config()
 RECORD_ID_PATTERN = r"^\d+$"
 # Shown as suggestions under the form's query field (JSON schema `examples`).
 # Each one found records on Zenodo on 2026-11-09.
@@ -120,28 +123,28 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "unchanged. Example: on for a first test.",
     )
     galaxy_url: str | None = Field(
-        None,
-        description="Galaxy server. If empty, the harvest config's server is used. "
-        "Needs your own API key. Example: https://usegalaxy.eu",
+        FORM_CONFIG.galaxy_url,
+        description="Galaxy server. If empty, the harvest config's one is used. "
+        "Another one needs your API key. Example: https://usegalaxy.eu",
     )
     galaxy_workflow_id: str | None = Field(
-        None,
+        FORM_CONFIG.galaxy_workflow_id or None,
         description="ID of the harvest workflow in Galaxy. If empty, the harvest "
         "config's ID is used. Example: a82009b719022643",
     )
     zenodo_url: str | None = Field(
-        None,
+        FORM_CONFIG.zenodo_url,
         description="Zenodo server. If empty, the harvest config's server is used. "
         "Gets no worker token. Example: https://sandbox.zenodo.org",
     )
     zenodo_request_delay: float | None = Field(
-        None,
+        FORM_CONFIG.zenodo_request_delay,
         ge=0,
         description="Seconds between Zenodo requests. If empty or shorter, the "
         "harvest config's delay is used. Example: 5",
     )
     zenodo_query: str | None = Field(
-        None,
+        FORM_CONFIG.zenodo_query,
         description="Zenodo search query. If empty, the config's is used. Click for "
         "examples. Example: STM AND resource_type.type:dataset",
         examples=ZENODO_QUERY_EXAMPLES,
@@ -153,27 +156,27 @@ class ZenodoHarvestWorkflowInput(BaseModel):
     )
     # The lists replace the config's lists; to extend one, give its old items too.
     raw_extensions: list[str] | None = Field(
-        None,
+        FORM_CONFIG.raw_extensions,
         description="Raw file extensions converted to NeXus. Replaces the config's "
         "list; if empty, the config's is used. Example: .sxm",
     )
     context_extensions: list[str] | None = Field(
-        None,
+        FORM_CONFIG.context_extensions,
         description="Extensions of files that describe the experiment; replaces the "
         "harvest config's list. Example: .txt",
     )
     ignore_patterns: list[str] | None = Field(
-        None,
+        FORM_CONFIG.ignore_patterns,
         description="Glob patterns of files to skip; replaces the harvest config's "
         "list. Example: __MACOSX/*",
     )
     licenses: list[str] | None = Field(
-        None,
+        FORM_CONFIG.licenses,
         description="Zenodo license IDs to accept, out of the harvest config's. "
         "If empty, all of them are accepted. Example: cc-by-4.0",
     )
     max_records: int | None = Field(
-        None,
+        1,
         ge=1,
         description="At most this many Zenodo records with new work. If empty, no "
         "limit. Example: 6, with records_per_work_list 2 → 3 runs",
@@ -185,13 +188,13 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "Example: 2 with max_records 6 → 3 Galaxy runs of 2 records",
     )
     repeat_every_days: int | None = Field(
-        None,
+        7,
         ge=1,
         description="Repeat the run every N days until stopped. If empty, it runs "
         "once. Example: 7",
     )
     max_runs: int | None = Field(
-        None,
+        1,
         ge=1,
         description="With repeat_every_days: number of runs, the first included. "
         "Example: 4 → this run and 3 repeats",
@@ -207,24 +210,22 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "quoted from the dataset are kept. Example: on",
     )
     llm_model: str | None = Field(
-        DEFAULT_LLM_MODEL,
+        FORM_CONFIG.llm_model,
         description="LLM Hub multimodal model. If empty, the config's is used. "
         "Example: gemma-4-31b-llmlb-freiburg",
         examples=LLM_MODEL_EXAMPLES,
     )
-    notify_email: str | None = Field(
-        None,
-        pattern=EMAIL_PATTERN,
-        description="Extra address that also gets the run report. "
-        "Example: name@example.org",
-    )
+    # An empty secret stays None but is left out of the saved input: on a rerun
+    # the GUI refuses a null in a password field ("must be string").
     galaxy_api_key: SecretStr | None = Field(
         None,
+        exclude_if=lambda value: value is None,
         description="Your Galaxy API key (User > Preferences > Manage API Key). "
         "If empty, the worker's GALAXY_API_KEY is used.",
     )
     zenodo_token: SecretStr | None = Field(
         None,
+        exclude_if=lambda value: value is None,
         description="Optional Zenodo token for larger search pages. If empty, "
         "the worker's ZENODO_TOKEN is used.",
     )
@@ -260,9 +261,18 @@ class ZenodoHarvestWorkflowInput(BaseModel):
 
     @model_validator(mode="after")
     def _own_galaxy_key_for_own_galaxy(self) -> "ZenodoHarvestWorkflowInput":
-        """The worker's GALAXY_API_KEY is only sent to the harvest config's Galaxy."""
-        if self.galaxy_url and not reveal(self.galaxy_api_key):
-            raise ValueError("galaxy_url is set: also give your galaxy_api_key")
+        """The worker's GALAXY_API_KEY is only sent to the harvest config's Galaxy.
+
+        Checked when NOMAD validates the form. Skipped in workflow code, which must
+        not read files; the activities check it again (`_config_server`).
+        """
+        if workflow.in_workflow() or not self.galaxy_url:
+            return self
+        config_galaxy = installation_config().galaxy_url
+        if self.galaxy_url != config_galaxy and not reveal(self.galaxy_api_key):
+            raise ValueError(
+                "galaxy_url is not the harvest config's: also give your galaxy_api_key"
+            )
         return self
 
     @field_validator("zenodo_record_ids")
@@ -280,7 +290,6 @@ class ZenodoHarvestWorkflowInput(BaseModel):
         "zenodo_url",
         "zenodo_query",
         "llm_model",
-        "notify_email",
         mode="before",
     )
     @classmethod
@@ -558,7 +567,6 @@ class EmailReportInput(BaseModel):
     report_path: str
     markdown_path: str
     user_id: str = Field(..., description="Recipient: the user who started the run.")
-    notify_email: str | None = Field(None, description="One more recipient.")
 
 
 class EmailReportResult(BaseModel):
