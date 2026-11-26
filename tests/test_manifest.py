@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.manifest import (
+    MAX_NO_RESULT_ATTEMPTS,
     Manifest,
     MergeSummary,
     Results,
@@ -135,10 +136,66 @@ def test_new_record_records_files_and_resolves_archive(store):
     assert _next_download(store, ("data.zip", "zip-md5")) == []
 
 
-def test_processed_file_without_result_fails(store):
-    _merge(store, archives=[_archive()], files=[_file("sha-a")])
+def test_file_without_result_is_retried_then_fails(store):
+    for attempt in range(1, MAX_NO_RESULT_ATTEMPTS):
+        summary = _merge(store, archives=[_archive()], files=[_file("sha-a")])
+        assert summary == MergeSummary(retried=1, archives_unresolved=1)
+        assert _status(store, "sha-a") == ("retry", "no_result", "zip-md5")
+        assert _file_state(store, "sha-a")["attempts"] == attempt
+        # Galaxy converts it again, from the archive downloaded again.
+        assert store.known_sha256(CID) == []
+        assert _next_download(store, ("data.zip", "zip-md5")) == ["data.zip"]
 
+    summary = _merge(store, archives=[_archive()], files=[_file("sha-a")])
+
+    assert summary == MergeSummary(failed=1, archives_resolved=1)
     assert _status(store, "sha-a") == ("failed", "no_result", "zip-md5")
+    assert _next_download(store, ("data.zip", "zip-md5")) == []
+
+
+def test_result_after_a_retry_resets_the_attempts(store):
+    _merge(store, archives=[_archive()], files=[_file("sha-a")])
+    _merge(
+        store,
+        archives=[_archive()],
+        files=[_file("sha-a")],
+        results=[("sha-a", "success", None)],
+    )
+
+    assert _status(store, "sha-a") == ("success", None, "zip-md5")
+    assert _file_state(store, "sha-a")["attempts"] == 0
+
+
+def test_retry_keeps_the_archive_of_other_files_known(store):
+    summary = _merge(
+        store,
+        archives=[_archive()],
+        files=[_file("sha-a"), _file("sha-b")],
+        results=[("sha-b", "success", None)],
+    )
+
+    assert summary == MergeSummary(success=1, retried=1, archives_unresolved=1)
+    # The archive comes again, but only sha-a is converted.
+    assert store.known_sha256(CID) == ["sha-b"]
+    assert _next_download(store, ("data.zip", "zip-md5")) == ["data.zip"]
+
+
+def test_loose_file_without_result_is_downloaded_again(store):
+    _merge(store, files=[_file("sha-a", source="loose", md5="md5-a")])
+
+    assert _status(store, "sha-a") == ("retry", "no_result", None)
+    assert _next_download(store, ("scan.sxm", "md5-a")) == ["scan.sxm"]
+
+
+def test_failed_conversion_is_not_retried(store):
+    _merge(
+        store,
+        files=[_file("sha-a", source="loose", md5="md5-a")],
+        results=[("sha-a", "failed", "reader error")],
+    )
+
+    assert _status(store, "sha-a") == ("failed", "reader error", None)
+    assert _next_download(store, ("scan.sxm", "md5-a")) == []
 
 
 def test_member_skipped_in_galaxy_fails_with_reason(store):

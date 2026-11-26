@@ -99,6 +99,7 @@ Before planning, each run also searches NOMAD for entries of the found Zenodo da
 - A raw file with an entry in NOMAD is not downloaded or converted again.
 - A raw file whose entry was deleted in NOMAD is converted again by the next run.
 - Failed files and archives are known only from `state.json`. Without the state project, the next run tries them again.
+- A raw file that Galaxy returns no result for (e.g. its job crashed) is converted again by the next run. After 3 such runs in a row it counts as failed.
 
 Each real run (not a dry run) also copies its report there: `reports/<start time in UTC>/report.json` and `report.md`. Open them in the project's file browser.
 

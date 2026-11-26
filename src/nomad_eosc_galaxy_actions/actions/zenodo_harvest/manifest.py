@@ -87,6 +87,11 @@ class Results(BaseModel):
     files: list[FileResult] = []
 
 
+# A file without a result (e.g. its Galaxy job crashed or was cancelled) is set to
+# `retry`, so the next run converts it again; after this many runs in a row it fails.
+MAX_NO_RESULT_ATTEMPTS = 3
+
+
 class MergeSummary(BaseModel):
     success: int = 0
     failed: int = 0
@@ -105,6 +110,19 @@ def file_status(
     if result is None:
         return "failed", "no_result"
     return result.status, result.error
+
+
+def _outcome(
+    store: StateStore, file: ManifestFile, result: FileResult | None
+) -> tuple[str, str | None, int]:
+    """Status, error and attempts of a file; status `known` if it is already known."""
+    if file.action == "already_known":
+        return "known", None, 0
+    status, error = file_status(file, result)
+    if error != "no_result":
+        return status, error, 0
+    attempts = store.attempts(file.concept_record_id, file.sha256) + 1
+    return ("retry" if attempts < MAX_NO_RESULT_ATTEMPTS else status), error, attempts
 
 
 def merge_manifest(
@@ -132,17 +150,20 @@ def merge_manifest(
     upload_ids = upload_ids or {}
     left_out = set(left_out)
     summary = MergeSummary(records_left_out=len(left_out))
+    retry_archives: set[tuple[str, str | None]] = set()
     with store.transaction():
         for file in manifest.files:
             # Context files are inputs, not tracked.
             if file.role != "raw" or file.record_id in left_out:
                 continue
             cid = file.concept_record_id
-            if file.source == "loose" and file.md5:
+            status, error, attempts = _outcome(store, file, by_sha256.get(file.sha256))
+            # A file to retry must be downloaded again: its loose MD5 stays unknown
+            # and its archive unresolved.
+            if file.source == "loose" and file.md5 and status != "retry":
                 store.record_loose_md5(cid, file.md5, file.sha256)
-            if file.action == "already_known":
+            if status == "known":
                 continue
-            status, error = file_status(file, by_sha256.get(file.sha256))
             store.record_file(
                 cid,
                 file.sha256,
@@ -157,9 +178,13 @@ def merge_manifest(
                     if file.source == "archive"
                     else None
                 ),
+                attempts=attempts,
             )
             if status == "success":
                 summary.success += 1
+            elif status == "retry":
+                summary.retried += 1
+                retry_archives.add((cid, file.archive_key))
             else:
                 summary.failed += 1
         for archive in manifest.archives:
@@ -169,11 +194,11 @@ def merge_manifest(
             resolved = (
                 archive.status == "extracted"
                 or archive.reason in PERMANENT_ARCHIVE_REASONS
-            )
+            ) and (archive.concept_record_id, archive.key) not in retry_archives
             store.set_archive_resolved(archive.concept_record_id, archive.md5, resolved)
             if resolved:
                 summary.archives_resolved += 1
             else:
                 summary.archives_unresolved += 1
-        summary.retried = store.retry_failed(manifest.tool_version)
+        summary.retried += store.retry_failed(manifest.tool_version)
     return summary

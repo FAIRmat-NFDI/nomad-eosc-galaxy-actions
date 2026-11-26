@@ -118,6 +118,19 @@ def test_upgrade_to_version_2_adds_the_nomad_fields(tmp_path):
         }
 
 
+def test_upgrade_to_version_3_adds_the_attempts(tmp_path):
+    path = tmp_path / "state.json"
+    file = {"status": "failed", "in_nomad": False, "published": False}
+    _write(
+        path, {"schema_version": 2, "files": {CID: {"sha-a": file}}, "loose_md5": {}}
+    )
+
+    with StateStore(path, schema_version=3, upgrades=UPGRADES) as store:
+        assert store.snapshot()["files"][CID]["sha-a"] == file | {"attempts": 0}
+        assert store.attempts(CID, "sha-a") == 0
+        assert store.attempts(CID, "sha-new") == 0
+
+
 def test_transaction_without_a_change_writes_nothing(tmp_path):
     path = tmp_path / "state.json"
     with StateStore(path) as store:
@@ -255,7 +268,12 @@ def test_retry_failed_reopens_archive_and_loose_file(store):
         store.set_archive_resolved(CID, "zip-1", True)
         store.set_archive_resolved(CID, "zip-2", True)
         store.record_file(
-            CID, "sha-a", status="failed", tool_version="0.1", archive_md5="zip-1"
+            CID,
+            "sha-a",
+            status="failed",
+            tool_version="0.1",
+            archive_md5="zip-1",
+            attempts=3,
         )
         store.record_file(
             CID, "sha-b", status="success", tool_version="0.1", archive_md5="zip-2"
@@ -268,6 +286,7 @@ def test_retry_failed_reopens_archive_and_loose_file(store):
         assert store.retry_failed("0.2") == 2  # noqa: PLR2004
 
     assert store.known_sha256(CID) == ["sha-b", "sha-d"]  # retry is not final
+    assert store.attempts(CID, "sha-a") == 0  # a new version gets new attempts
     assert not store.is_archive_resolved(CID, "zip-1")
     assert store.is_archive_resolved(CID, "zip-2")  # only successes inside
     assert not store.is_loose_md5_known(CID, "md5-c")
