@@ -611,6 +611,16 @@ def poll_galaxy(data: PollGalaxyInput) -> PollGalaxyResult:
 
 
 @activity.defn
+def cancel_galaxy(data: PollGalaxyInput) -> None:
+    """Cancel a stuck invocation, so its paused jobs stop."""
+    galaxy_client.cancel_invocation(
+        api_key=_galaxy_key(data),
+        invocation_id=data.invocation_id,
+        galaxy_url=_harvest_config(data).galaxy_url,
+    )
+
+
+@activity.defn
 def fetch_manifest(data: FetchManifestInput) -> FetchManifestResult:
     """Download Galaxy's manifest (and results) into the run folder and check it.
 

@@ -121,6 +121,7 @@ class FakeGalaxy(ThreadingHTTPServer):
     Per poll (the last entry repeats): `invocation_states` gives the invocation
     state, and `job_states` the job summary, as one state or {state: count}.
     `dataset_states` and `collection_states` override the `ok` of an ID.
+    A cancel (DELETE of the invocation) sets `cancelled`.
     """
 
     def __init__(self):
@@ -141,6 +142,7 @@ class FakeGalaxy(ThreadingHTTPServer):
         self.history_payload: dict = {}
         self.on_invoke = None
         self.work_lists: list[dict] = []
+        self.cancelled = False
 
     @property
     def url(self) -> str:
@@ -182,6 +184,13 @@ class _FakeGalaxyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._get(self._path())
+
+    def do_DELETE(self):
+        if self._path() == "/api/invocations/inv-1":
+            self.server.cancelled = True
+            self._send(200, {"id": "inv-1", "state": "cancelling"})
+        else:
+            self._send(404, {"err_msg": "unknown"})
 
     def _get(self, path: str):
         server = self.server

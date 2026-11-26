@@ -45,6 +45,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
     STATE_PROJECT,
     WORK_LIST_FILE,
     build_work_list,
+    cancel_galaxy,
     create_projects,
     email_report,
     fetch_manifest,
@@ -99,6 +100,7 @@ from nomad_eosc_galaxy_actions.actions.zenodo_harvest.work_list import (
     WORK_LIST_SCHEMA_VERSION,
 )
 from nomad_eosc_galaxy_actions.actions.zenodo_harvest.workflows import (
+    GALAXY_STUCK_POLLS,
     ZenodoHarvestWorkflow,
 )
 
@@ -308,6 +310,7 @@ ALL_ACTIVITIES = [
     prepare_batch,
     run_galaxy,
     poll_galaxy,
+    cancel_galaxy,
     fetch_manifest,
     fetch_projects,
     create_projects,
@@ -743,6 +746,10 @@ def test_galaxy_key_from_the_form_wins(tmp_path, galaxy_config):
         ("failed", "ok", True, "error", None),
         ("cancelled", "running", True, "error", None),
         ("cancelling", "running", False, "cancelling", None),
+        # Paused jobs while scheduling: stuck, unless a job is still active.
+        ("ready", {"ok": 24, "error": 59, "paused": 59}, False, "stuck", None),
+        ("ready", {"paused": 3, "running": 1}, False, "ready", None),
+        ("ready", {"ok": 3, "error": 1}, False, "ready", None),
     ],
 )
 def test_poll_galaxy_activity(galaxy_config, case):
@@ -760,7 +767,7 @@ def test_poll_galaxy_activity(galaxy_config, case):
 
 def test_poll_galaxy_waits_until_all_jobs_exist(galaxy_config):
     galaxy_config.invocation_states = ["ready", "scheduled", "scheduled"]
-    galaxy_config.job_states = [{"ok": 2, "running": 26}, {"ok": 28}]
+    galaxy_config.job_states = [{"ok": 2}, {"ok": 2, "running": 26}, {"ok": 28}]
 
     polls = [
         ActivityEnvironment().run(poll_galaxy, PollGalaxyInput(invocation_id="inv-1"))
@@ -1682,6 +1689,44 @@ async def test_workflow_fails_when_a_partial_run_has_no_report(
     assert ("GET", "/api/datasets/out-1/display") not in fake_galaxy.requests
     with StateStore(_state(actions_fs)) as store:
         assert store.known_sha256(CID) == []  # handled again by the next run
+
+
+@pytest.mark.asyncio
+async def test_workflow_cancels_a_stuck_galaxy_run(
+    actions_fs, nomad_config, fake_galaxy
+):
+    from nomad_eosc_galaxy_actions.actions.zenodo_harvest.state_store import StateStore  # noqa: PLC0415
+
+    _real_galaxy(fake_galaxy)
+    fake_galaxy.invocation_states = ["ready"]
+    fake_galaxy.job_states = [{"ok": 2, "error": 1, "paused": 1}]
+
+    with pytest.raises(WorkflowFailureError) as error:
+        await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    assert "stopped on paused jobs and was cancelled" in str(error.value.cause)
+    assert fake_galaxy.cancelled
+    # Each batch is cancelled after the same number of polls; the next batch still runs.
+    polls = fake_galaxy.requests.count(("GET", "/api/invocations/inv-1/jobs_summary"))
+    assert len(fake_galaxy.work_lists) > 1
+    assert polls == len(fake_galaxy.work_lists) * GALAXY_STUCK_POLLS
+    with StateStore(_state(actions_fs)) as store:
+        assert store.known_sha256(CID) == []  # handled again by the next run
+
+
+@pytest.mark.asyncio
+async def test_workflow_waits_through_a_short_stuck_gap(
+    actions_fs, nomad_config, fake_galaxy
+):
+    _real_galaxy(fake_galaxy)
+    gap = GALAXY_STUCK_POLLS - 1
+    fake_galaxy.invocation_states = ["ready"] * gap + ["scheduled"]
+    fake_galaxy.job_states = [{"ok": 1, "paused": 1}] * gap + ["ok"]
+
+    result = await _run_workflow(f"zenodo-harvest-{uuid.uuid4()}", dry_run=False)
+
+    assert not fake_galaxy.cancelled
+    assert result["nomad"]["created"] == [RECORD]
 
 
 @pytest.mark.asyncio
