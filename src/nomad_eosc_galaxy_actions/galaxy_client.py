@@ -123,6 +123,10 @@ def poll_invocation(
       datasets are `ok` are returned, so a step that never ran has none.
     * `error`: the invocation itself failed or was cancelled; no outputs.
 
+    While Galaxy still schedules (not done), `state` is `stuck` if jobs are
+    paused and none is active: Galaxy never schedules the steps after a paused
+    job's dynamic collection, so the invocation would wait forever.
+
     outputs maps output names to Galaxy dataset IDs. They come from each
     single-job step's outputs (keyed by the tool's output names), overridden by
     the workflow's labelled outputs (`invocation["outputs"]`, and
@@ -132,11 +136,12 @@ def poll_invocation(
     invocation = gi.invocations.show_invocation(invocation_id)
     if invocation["state"] in _FAILED_INVOCATION_STATES:
         return {"done": True, "state": "error", "outputs": None}
-    if invocation["state"] not in _ENDED_INVOCATION_STATES:  # still scheduling
-        return {"done": False, "state": invocation["state"], "outputs": None}
-
     # The job summary counts all jobs, also those of mapped steps (no `job_id`).
     states = set(gi.invocations.get_invocation_summary(invocation_id)["states"])
+    if invocation["state"] not in _ENDED_INVOCATION_STATES:  # still scheduling
+        stuck = "paused" in states and not states & _ACTIVE_JOB_STATES
+        state = "stuck" if stuck else invocation["state"]
+        return {"done": False, "state": state, "outputs": None}
     if invocation["state"] == "scheduled" and (
         not states or states & _ACTIVE_JOB_STATES
     ):
@@ -168,6 +173,13 @@ def poll_invocation(
         if collection.get("populated_state") == "ok":
             outputs[name] = collection_id
     return {"done": True, "state": "partial", "outputs": outputs}
+
+
+def cancel_invocation(
+    api_key: str, invocation_id: str, galaxy_url: str = GALAXY_URL
+) -> None:
+    """Cancel an invocation; Galaxy also stops its paused and waiting jobs."""
+    get_instance(api_key, galaxy_url).invocations.cancel_invocation(invocation_id)
 
 
 def collection_elements(

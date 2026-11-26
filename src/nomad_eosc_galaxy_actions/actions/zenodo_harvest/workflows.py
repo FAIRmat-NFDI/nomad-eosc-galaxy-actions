@@ -16,6 +16,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, CancelledErro
 with workflow.unsafe.imports_passed_through():
     from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (
         build_work_list,
+        cancel_galaxy,
         create_projects,
         email_report,
         fetch_manifest,
@@ -51,6 +52,9 @@ with workflow.unsafe.imports_passed_through():
 # Galaxy may need hours for large archives; check once a minute for a day.
 GALAXY_POLL_INTERVAL = timedelta(minutes=1)
 GALAXY_MAX_POLLS = 24 * 60
+# Polls in a row with paused and no active jobs before a run counts as stuck and is
+# cancelled; a short gap between two steps looks the same for a moment.
+GALAXY_STUCK_POLLS = 10
 # Names of the Galaxy workflow outputs; the .ga file must use these labels.
 GALAXY_MANIFEST_OUTPUT = "manifest"
 GALAXY_RESULTS_OUTPUT = "results"
@@ -361,19 +365,34 @@ class ZenodoHarvestWorkflow:
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=retry_policy,
         )
+        poll_input = PollGalaxyInput(
+            invocation_id=started.invocation_id,
+            galaxy_api_key=galaxy_api_key,
+            **data.config_overrides(),
+        )
+        stuck_polls = 0
         for _ in range(GALAXY_MAX_POLLS):
             polled = await workflow.execute_activity(
                 poll_galaxy,
-                PollGalaxyInput(
-                    invocation_id=started.invocation_id,
-                    galaxy_api_key=galaxy_api_key,
-                    **data.config_overrides(),
-                ),
+                poll_input,
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=retry_policy,
             )
             if polled.done:
                 break
+            stuck_polls = stuck_polls + 1 if polled.state == "stuck" else 0
+            if stuck_polls >= GALAXY_STUCK_POLLS:
+                await workflow.execute_activity(
+                    cancel_galaxy,
+                    poll_input,
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=retry_policy,
+                )
+                # No report yet: the state stays, so the next run handles these files.
+                raise ApplicationError(
+                    f"Galaxy invocation {started.invocation_id} stopped on paused jobs "
+                    f"and was cancelled; see history {started.history_id}"
+                )
             await workflow.sleep(GALAXY_POLL_INTERVAL)
         else:
             raise ApplicationError(

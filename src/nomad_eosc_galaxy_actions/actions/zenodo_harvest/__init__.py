@@ -43,6 +43,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
 
         from nomad_eosc_galaxy_actions.actions.zenodo_harvest.activities import (  # noqa: PLC0415
             build_work_list,
+            cancel_galaxy,
             create_projects,
             email_report,
             fetch_manifest,
@@ -70,6 +71,7 @@ class ZenodoHarvestActionEntryPoint(ActionEntryPoint):
                 prepare_batch,
                 run_galaxy,
                 poll_galaxy,
+                cancel_galaxy,
                 fetch_manifest,
                 fetch_projects,
                 create_projects,

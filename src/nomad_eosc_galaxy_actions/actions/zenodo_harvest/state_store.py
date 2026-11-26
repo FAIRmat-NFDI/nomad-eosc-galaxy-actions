@@ -41,7 +41,7 @@ from typing import Any
 
 # Version of the file layout (keys and their meaning). When it changes: bump
 # it and add the function that turns version n into n + 1 to UPGRADES[n].
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 Upgrade = Callable[[dict[str, Any]], dict[str, Any]]
 
 
@@ -54,7 +54,15 @@ def _add_nomad_fields(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-UPGRADES: dict[int, Upgrade] = {1: _add_nomad_fields}
+def _add_attempts(state: dict[str, Any]) -> dict[str, Any]:
+    """Version 2 → 3: each file gets `attempts` (runs in a row without a result)."""
+    for files in state.get("files", {}).values():
+        for file in files.values():
+            file.setdefault("attempts", 0)
+    return state
+
+
+UPGRADES: dict[int, Upgrade] = {1: _add_nomad_fields, 2: _add_attempts}
 
 # Statuses that mean "done, do not process again". `retry` is not final.
 FINAL_STATUSES = ("success", "failed")
@@ -227,6 +235,11 @@ class StateStore:
             sha256 for sha256, file in files.items() if file["status"] in FINAL_STATUSES
         )
 
+    def attempts(self, concept_record_id: str, sha256: str) -> int:
+        """Runs in a row in which the file got no result; 0 for a new file."""
+        file = self._state["files"].get(concept_record_id, {}).get(sha256, {})
+        return file.get("attempts", 0)
+
     def is_loose_md5_known(self, concept_record_id: str, md5: str) -> bool:
         return md5 in self._state["loose_md5"].get(concept_record_id, {})
 
@@ -248,11 +261,13 @@ class StateStore:
         upload_id: str | None = None,
         error: str | None = None,
         archive_md5: str | None = None,
+        attempts: int = 0,
     ) -> None:
         """Insert or replace the state of one raw file.
 
         `version_doi` keeps the first version the file was seen in.
         `archive_md5` is the archive it came from (None for a loose file).
+        `attempts`: runs in a row without a result (see `merge_manifest`).
         `in_nomad` and `published` are kept; only `sync_from_nomad` sets them.
         """
         files = self._map("files", concept_record_id)
@@ -266,6 +281,7 @@ class StateStore:
             "error": error,
             "updated_at": _now(),
             "archive_md5": archive_md5,
+            "attempts": attempts,
             "in_nomad": old.get("in_nomad", False),
             "published": old.get("published", False),
         }
@@ -321,6 +337,7 @@ class StateStore:
                 "error": None,
                 "updated_at": _now(),
                 "archive_md5": old.get("archive_md5"),
+                "attempts": 0,
                 "in_nomad": True,
                 "published": file.published,
             }
@@ -369,7 +386,7 @@ class StateStore:
             for sha256, file in files.items():
                 if file["status"] != "failed" or file["tool_version"] == tool_version:
                     continue
-                file |= {"status": "retry", "updated_at": _now()}
+                file |= {"status": "retry", "attempts": 0, "updated_at": _now()}
                 count += 1
                 archive = self._state["archives"].get(cid, {}).get(file["archive_md5"])
                 if archive:
