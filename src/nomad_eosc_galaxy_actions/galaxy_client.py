@@ -57,6 +57,7 @@ def upload_and_invoke(  # noqa: PLR0913
     workflow_input_step: str = "0",
     tool_params: dict[str, dict[str, Any]] | None = None,
     parameter_inputs: dict[str, Any] | None = None,
+    inputs_by: str = "step_index",
     history_name: str | None = None,
     galaxy_url: str = GALAXY_URL,
 ) -> dict[str, str]:
@@ -69,12 +70,14 @@ def upload_and_invoke(  # noqa: PLR0913
             auto-detection ('auto') — pass the specific datatype explicitly
             when auto-detection can't be relied on (see the design doc's note
             on the `nxxps` sniffer bug for why XPS callers should).
-        workflow_input_step: step index of the workflow's data-input step.
+        workflow_input_step: the workflow's data-input step, as `inputs_by` says.
         tool_params: `{step_index: {param_name: value, ...}, ...}`, forwarded
             to `invoke_workflow`'s `params` as-is — shape depends entirely on
             the target tool(s)' own parameters.
-        parameter_inputs: `{step_index: value}` for the workflow's parameter
+        parameter_inputs: `{step: value}` for the workflow's parameter
             inputs (text, boolean, ...); unset ones keep their default.
+        inputs_by: how Galaxy finds the input steps: `step_index`, or `name`
+            for the step labels, which stay when the workflow is edited.
         history_name: defaults to the uploaded file's stem if not given.
 
     Returns:
@@ -101,7 +104,7 @@ def upload_and_invoke(  # noqa: PLR0913
         },
         params=tool_params,
         history_id=history["id"],
-        inputs_by="step_index",
+        inputs_by=inputs_by,
     )
     return {"history_id": history["id"], "invocation_id": invocation["id"]}
 

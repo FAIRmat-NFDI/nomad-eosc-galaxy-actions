@@ -119,10 +119,11 @@ REPORT_MARKDOWN_FILE = "report.md"
 # Folder of the state project with one subfolder per run, named by its start
 # time; NOMAD's file browser shows these files.
 REPORTS_FOLDER = "reports"
-# Step indices of the harvest workflow's inputs (step 1: prefetched files).
-GALAXY_WORK_LIST_STEP = "0"
-GALAXY_USE_LLM_STEP = "2"
-GALAXY_LLM_MODEL_STEP = "3"
+# Labels of the harvest workflow's inputs. Sent by label, not step index:
+# saving the workflow in Galaxy's editor can change the step order.
+GALAXY_WORK_LIST_INPUT = "work list"
+GALAXY_USE_LLM_INPUT = "use llm"
+GALAXY_LLM_MODEL_INPUT = "llm model"
 # Zenodo allows larger pages for authenticated requests.
 PAGE_SIZE_ANONYMOUS = 25
 PAGE_SIZE_AUTHENTICATED = 100
@@ -568,17 +569,18 @@ def run_galaxy(data: RunGalaxyInput) -> RunGalaxyResult:
     harvest_config = _harvest_config(data)
     api_key = _galaxy_key(data)
     model = _llm_model(data, harvest_config)
-    inputs: dict[str, Any] = {GALAXY_USE_LLM_STEP: data.use_llm}
+    inputs: dict[str, Any] = {GALAXY_USE_LLM_INPUT: data.use_llm}
     if model:
-        inputs[GALAXY_LLM_MODEL_STEP] = model
+        inputs[GALAXY_LLM_MODEL_INPUT] = model
     llm = model or "off (form)"
     result = galaxy_client.upload_and_invoke(
         api_key=api_key,
         workflow_id=harvest_config.galaxy_workflow_id,
         file_path=data.work_list_path,
         file_type="json",
-        workflow_input_step=GALAXY_WORK_LIST_STEP,
+        workflow_input_step=GALAXY_WORK_LIST_INPUT,
         parameter_inputs=inputs,
+        inputs_by="name",
         history_name=f"zenodo-harvest-{data.run_id}",
         galaxy_url=harvest_config.galaxy_url,
     )
