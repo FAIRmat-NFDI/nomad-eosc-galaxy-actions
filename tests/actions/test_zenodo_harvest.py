@@ -611,11 +611,12 @@ def test_run_galaxy_activity(tmp_path, galaxy_config):
     assert galaxy_config.uploaded == path.read_bytes()
     assert galaxy_config.history_payload["name"] == "zenodo-harvest-run-1"
     payload = galaxy_config.invocation_payload
-    # Work list, LLM on (default) and the config's model.
+    # Work list, LLM on (default) and the config's model, by label.
+    assert payload["inputs_by"] == "name"
     assert payload["inputs"] == {
-        "0": {"src": "hda", "id": "in-1"},
-        "2": True,
-        "3": "mistral-medium-3.5-e-infra.cz",
+        "work list": {"src": "hda", "id": "in-1"},
+        "use llm": True,
+        "llm model": "mistral-medium-3.5-e-infra.cz",
     }
     assert result.llm == "mistral-medium-3.5-e-infra.cz"
     assert ("POST", "/api/workflows/wf-1/invocations") in galaxy_config.requests
@@ -631,15 +632,17 @@ def _run_galaxy_llm(**form) -> tuple:
 
 
 def _parameter_inputs(galaxy) -> dict:
-    return {k: v for k, v in galaxy.invocation_payload["inputs"].items() if k != "0"}
+    return {
+        k: v for k, v in galaxy.invocation_payload["inputs"].items() if k != "work list"
+    }
 
 
 def test_llm_model_from_the_form(tmp_path, galaxy_config):
     _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="gemma-3-27b-llmlb-freiburg")
 
     assert _parameter_inputs(galaxy_config) == {
-        "2": True,
-        "3": "gemma-3-27b-llmlb-freiburg",
+        "use llm": True,
+        "llm model": "gemma-3-27b-llmlb-freiburg",
     }
     assert llm == "gemma-3-27b-llmlb-freiburg"
 
@@ -647,7 +650,7 @@ def test_llm_model_from_the_form(tmp_path, galaxy_config):
 def test_llm_off_in_the_form(tmp_path, galaxy_config):
     _, llm = _run_galaxy_llm(run_dir=tmp_path, use_llm=False)
 
-    assert _parameter_inputs(galaxy_config) == {"2": False}
+    assert _parameter_inputs(galaxy_config) == {"use llm": False}
     assert llm == "off (form)"
 
 
@@ -657,7 +660,10 @@ def test_empty_form_model_uses_the_config(tmp_path, galaxy_config, harvest_confi
 
     _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="")
 
-    assert _parameter_inputs(galaxy_config) == {"2": True, "3": "config-model"}
+    assert _parameter_inputs(galaxy_config) == {
+        "use llm": True,
+        "llm model": "config-model",
+    }
     assert llm == "config-model"
 
 
@@ -665,7 +671,10 @@ def test_model_is_sent_without_a_check(tmp_path, galaxy_config):
     # The Action does not ask Galaxy for its models; LLM Hub falls back itself.
     _, llm = _run_galaxy_llm(run_dir=tmp_path, llm_model="no-such-model")
 
-    assert _parameter_inputs(galaxy_config) == {"2": True, "3": "no-such-model"}
+    assert _parameter_inputs(galaxy_config) == {
+        "use llm": True,
+        "llm model": "no-such-model",
+    }
     assert llm == "no-such-model"
     assert not [r for r in galaxy_config.requests if r[1].endswith("/build")]
 
